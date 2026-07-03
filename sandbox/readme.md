@@ -158,6 +158,14 @@ def execute(params: dict):
 
 ## 本地运行
 
+从仓库根目录创建 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+sandbox 启动时会从当前目录或父目录自动加载 `.env`。executable skill 的 `required_secrets` 会从 sandbox 进程环境中解析，例如 `API_TOKEN: env:UPSTREAM_API_TOKEN`。
+
 ```bash
 cd sandbox
 pip install -r requirements.txt

@@ -387,6 +387,44 @@ textarea:focus {
   font-size: 12px;
 }
 
+.trace-item summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.step-kind {
+  padding: 3px 8px;
+  border-radius: 999px;
+  color: #fff9eb;
+  background: var(--steel);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.step-thinking .step-kind {
+  background: var(--slag);
+  color: #3b2a12;
+}
+
+.step-sandbox_execution .step-kind {
+  background: var(--accent);
+}
+
+.step-waiting_for_user .step-kind {
+  background: var(--danger);
+}
+
+.trace-detail {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .empty {
   padding: 14px;
   border: 1px dashed var(--line);

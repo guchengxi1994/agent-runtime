@@ -43,7 +43,8 @@ async function loadHealth() {
   try {
     const health = await fetchJson("/health");
     pulse.classList.remove("offline");
-    healthText.textContent = `${health.model} · ${health.skills} skills · ${health.executable_skills} executable`;
+    const baseUrl = health.openai_base_url ? ` · ${health.openai_base_url}` : "";
+    healthText.textContent = `${health.model}${baseUrl} · ${health.skills} skills · ${health.executable_skills} executable`;
   } catch (error) {
     pulse.classList.add("offline");
     healthText.textContent = `连接失败：${error.message}`;
@@ -92,8 +93,33 @@ function addMessage(role, text) {
   messages.scrollTop = messages.scrollHeight;
 }
 
-function renderTrace(toolCalls) {
+function renderTrace(steps, toolCalls) {
   const traceList = $("traceList");
+  if (steps && steps.length) {
+    traceList.innerHTML = "";
+    for (const step of steps) {
+      const item = document.createElement("details");
+      item.className = `trace-item step-${escapeText(step.kind || "unknown")}`;
+      item.open = step.kind === "waiting_for_user" || step.kind === "sandbox_execution";
+      item.innerHTML = `
+        <summary>
+          <span class="step-kind">${escapeText(step.kind || "unknown")}</span>
+          <strong>${escapeText(step.label || "")}</strong>
+          <span>${escapeText(step.status || "")}</span>
+        </summary>
+        <p class="trace-detail">${escapeText(step.detail || "")}</p>
+        <pre>${escapeText(JSON.stringify({
+          step_id: step.step_id,
+          metadata: step.metadata,
+          tool_call_id: step.tool_call_id,
+          execution_id: step.execution_id,
+          created_at: step.created_at,
+        }, null, 2))}</pre>
+      `;
+      traceList.appendChild(item);
+    }
+    return;
+  }
   if (!toolCalls || !toolCalls.length) {
     traceList.innerHTML = '<p class="hint">本轮没有 runtime 调用。</p>';
     return;
@@ -155,7 +181,7 @@ async function sendMessage(event) {
     $("conversationId").textContent = `conversation: ${state.conversationId}`;
     const suffix = response.status === "waiting_for_user" ? "\n\n状态：等待用户补充信息。" : "";
     addMessage("assistant", `${response.message || "(empty response)"}${suffix}`);
-    renderTrace(response.tool_calls);
+    renderTrace(response.steps, response.tool_calls);
   } catch (error) {
     addMessage("assistant", `请求失败：${error.message}`);
   } finally {

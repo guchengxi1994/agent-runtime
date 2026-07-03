@@ -10,10 +10,12 @@ from fastapi.staticfiles import StaticFiles
 
 from .agent import AgentRequestError, AgentRuntime
 from .config import load_settings
+from .logging_utils import setup_logging
 from .models import AgentDefinition, ChatRequest, ChatResponse, SkillPackage, UserContext
 from .registry import FileRegistry, RegistryError
 
 settings = load_settings()
+setup_logging()
 registry = FileRegistry(settings.registry_dir)
 registry.reload()
 runtime = AgentRuntime(settings, registry)
@@ -49,6 +51,9 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "mode": "server_chat_runtime",
         "model": settings.model,
+        "openai_base_url": settings.openai_base_url,
+        "reasoning_effort": settings.reasoning_effort,
+        "expose_reasoning_content": settings.expose_reasoning_content,
         "registry_dir": str(settings.registry_dir),
         "sandbox_url": settings.sandbox_url,
         "admin_auth_enabled": settings.admin_auth_enabled,

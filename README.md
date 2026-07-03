@@ -26,7 +26,8 @@
 推荐用 compose 启动主 runtime 和内部 sandbox：
 
 ```bash
-export OPENAI_API_KEY="你的 OpenAI API Key"
+cp .env.example .env
+# 编辑 .env，填入 OPENAI_API_KEY、AGENT_RUNTIME_MODEL、AGENT_RUNTIME_OPENAI_BASE_URL 等
 docker compose up --build
 ```
 
@@ -38,6 +39,15 @@ docker compose up --build
 - `sandbox-runtime`: sandbox 的 venv、pip cache 和临时执行目录 volume
 
 ## 本地启动
+
+开发环境建议用 `.env` 管理变量：
+
+```bash
+cp .env.example .env
+# 编辑 .env
+```
+
+`agent_runtime` 和 `sandbox` 都会从当前目录或父目录自动加载 `.env`。真实 `.env` 已被 `.gitignore` 忽略，不要提交。
 
 先启动 sandbox：
 
@@ -51,8 +61,6 @@ python app.py
 
 ```bash
 pip install -r requirements.txt
-set OPENAI_API_KEY=你的 OpenAI API Key
-set AGENT_RUNTIME_SANDBOX_URL=http://127.0.0.1:8001
 python -m agent_runtime
 ```
 
@@ -131,6 +139,18 @@ metadata:
 - 下一次同 `conversation_id` 的用户消息会被当作补充输入，runtime 清除 pending 状态并继续规划。
 - 这个动作会进入 trace，但不会进入 sandbox，也不会产生代码执行。
 
+## Step Trace
+
+`ChatResponse` 同时返回 `steps` 和 `tool_calls`。前端和控制台都应优先使用 `steps` 判断当前阶段类型：
+
+- `thinking`: runtime 正在调用模型规划下一步。默认不暴露隐藏推理文本；如果兼容模型返回 `reasoning_content`，且 `AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=true`，才会把它放进 `detail`。
+- `runtime_call`: runtime 内置动作，例如 `activate_skill`、`read_skill_resource` 或权限拒绝。
+- `sandbox_execution`: executable skill 已转发到 sandbox 执行。
+- `waiting_for_user`: 通过 `request_user_input` 暂停，等待用户补充字段。
+- `final`: 生成最终回复或 runtime 达到轮次上限。
+
+控制台会输出同源日志：`runtime_step step_id=... kind=... label=... status=...`，用于调试模型规划、sandbox 执行和用户输入暂停之间的边界。
+
 ## API
 
 - `GET /health`: runtime 状态和 executable skill 数量
@@ -147,14 +167,19 @@ metadata:
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | 无 | OpenAI SDK 使用 |
+| `OPENAI_BASE_URL` | 空 | OpenAI-compatible provider base URL |
 | `AGENT_RUNTIME_HOST` | `0.0.0.0` | 服务监听地址 |
 | `AGENT_RUNTIME_PORT` | `8010` | 服务端口 |
 | `AGENT_RUNTIME_MODEL` | `gpt-4.1-mini` | OpenAI 模型 |
+| `AGENT_RUNTIME_OPENAI_BASE_URL` | 空 | 覆盖 `OPENAI_BASE_URL` 的模型 base URL |
+| `AGENT_RUNTIME_REASONING_EFFORT` | 空 | 可选，仅在 provider/model 支持时传给 Chat Completions |
+| `AGENT_RUNTIME_EXPOSE_REASONING_CONTENT` | `false` | 是否在 `steps.kind=thinking` 中展示兼容接口返回的 reasoning 文本 |
 | `AGENT_RUNTIME_SANDBOX_URL` | `http://127.0.0.1:8001` | sandbox 地址 |
 | `AGENT_RUNTIME_REGISTRY_DIR` | `./registry` | skill/agent 文件注册表 |
 | `AGENT_RUNTIME_ADMIN_TOKEN` | 空 | 设置后管理接口要求 Bearer token |
 | `AGENT_RUNTIME_MAX_RUNTIME_ROUNDS` | `6` | 单轮对话最大 runtime 调用轮次 |
 | `AGENT_RUNTIME_REQUEST_TIMEOUT_SECONDS` | `600` | 调用 sandbox 的 HTTP 超时 |
+| `AGENT_RUNTIME_LOG_LEVEL` | `INFO` | runtime 控制台日志等级 |
 
 ## 优化细则
 
@@ -164,4 +189,5 @@ metadata:
 - Sandbox 必须是独立服务，主 runtime 不能内嵌 venv、pip install 或 subprocess 执行。
 - 依赖、secret、timeout、venv cache key 都属于执行策略，不属于 prompt 文本。
 - 用户输入请求必须是显式 runtime 状态，而不是普通闲聊回复；否则复杂 harness 无法稳定暂停和恢复。
+- thinking 必须作为可观测阶段单独标记；默认只展示阶段状态，不把隐藏推理混到最终回答或 sandbox 日志里。
 - 审计记录要包含 `agent_id`、`conversation_id`、`run_id`、`skill_name`、执行耗时、依赖和错误阶段。

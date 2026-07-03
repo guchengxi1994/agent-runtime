@@ -165,12 +165,25 @@ class ToolCallTrace(BaseModel):
     execution_id: str | None = None
 
 
+class RuntimeStepTrace(BaseModel):
+    step_id: str
+    kind: str
+    label: str
+    status: str = "completed"
+    detail: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    tool_call_id: str | None = None
+    execution_id: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ChatResponse(BaseModel):
     conversation_id: str
     agent_id: str
     message: str
     status: str = "completed"
     requested_inputs: list[RequestedInputField] = Field(default_factory=list)
+    steps: list[RuntimeStepTrace] = Field(default_factory=list)
     tool_calls: list[ToolCallTrace] = Field(default_factory=list)
     model: str
 

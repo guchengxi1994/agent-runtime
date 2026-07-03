@@ -5,6 +5,43 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+def load_dotenv() -> None:
+    env_file = os.getenv("AGENT_SANDBOX_ENV_FILE") or os.getenv("AGENT_RUNTIME_ENV_FILE") or os.getenv("ENV_FILE")
+    candidates = [Path(env_file)] if env_file else env_file_candidates()
+    for path in candidates:
+        if not path.is_file():
+            continue
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :].strip()
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("\"'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+        return
+
+
+def env_file_candidates() -> list[Path]:
+    cwd = Path.cwd().resolve()
+    candidates = [cwd / ".env", *[parent / ".env" for parent in cwd.parents]]
+    package_root = Path(__file__).resolve().parents[2]
+    candidates.append(package_root / ".env")
+    unique: list[Path] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        resolved = path.resolve()
+        if resolved not in seen:
+            seen.add(resolved)
+            unique.append(resolved)
+    return unique
+
+
 def get_env(key: str, fallback: str) -> str:
     return os.getenv(key, fallback)
 
@@ -47,6 +84,7 @@ class RuntimeSettings:
 
 
 def load_settings() -> RuntimeSettings:
+    load_dotenv()
     port = int(get_env("ARTISAN_PLUGIN_SERVER_PORT", get_env("PORT", "8001")))
     runtime_dir = Path(get_env("ARTISAN_PLUGIN_RUNTIME_DIR", "./plugins_runtime")).resolve()
     venv_root = Path(get_env("ARTISAN_PLUGIN_VENV_ROOT", str(runtime_dir / "venvs"))).resolve()

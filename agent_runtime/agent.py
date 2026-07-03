@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,7 @@ from .models import (
     ChatRequest,
     ChatResponse,
     ConversationState,
+    RuntimeStepTrace,
     SkillDefinition,
     SkillExecutionContext,
     ToolCallTrace,
@@ -20,6 +22,9 @@ from .models import (
 from .permissions import is_allowed
 from .registry import FileRegistry
 from .runner_client import SandboxClient
+
+
+logger = logging.getLogger("agent_runtime.steps")
 
 
 BASE_SYSTEM_PROMPT = """You are an enterprise agent runtime.
@@ -116,7 +121,10 @@ class AgentRuntime:
     def __init__(self, settings: AgentRuntimeSettings, registry: FileRegistry) -> None:
         self.settings = settings
         self.registry = registry
-        self.openai = AsyncOpenAI()
+        openai_kwargs: dict[str, Any] = {}
+        if settings.openai_base_url:
+            openai_kwargs["base_url"] = settings.openai_base_url
+        self.openai = AsyncOpenAI(**openai_kwargs)
         self.runner = SandboxClient(settings.sandbox_url, settings.request_timeout_seconds)
         self.conversations: dict[str, ConversationState] = {}
         self.executions: list[dict[str, Any]] = []
@@ -140,8 +148,9 @@ class AgentRuntime:
             messages.append({"role": "system", "content": self._build_pending_input_prompt(pending_input_request)})
         messages.extend(conversation.messages)
         traces: list[ToolCallTrace] = []
+        steps: list[RuntimeStepTrace] = []
 
-        for _ in range(self.settings.max_runtime_rounds + 1):
+        for round_index in range(self.settings.max_runtime_rounds + 1):
             executable_skills = self._select_executable_skills(request, agent, available_skills)
             runtime_tools = self._runtime_tools(executable_skills, bool(available_skills))
             skill_by_name = {skill.name: skill for skill in executable_skills}
@@ -149,25 +158,65 @@ class AgentRuntime:
                 "model": self.settings.model,
                 "messages": messages,
             }
+            if self.settings.reasoning_effort:
+                openai_kwargs["reasoning_effort"] = self.settings.reasoning_effort
             if runtime_tools:
                 openai_kwargs["tools"] = runtime_tools
                 openai_kwargs["tool_choice"] = "auto"
+            self._record_step(
+                steps,
+                kind="thinking",
+                label="model_planning",
+                status="started",
+                detail="Calling the model to plan the next observable action.",
+                metadata={
+                    "run_id": run_id,
+                    "round": round_index,
+                    "model": self.settings.model,
+                    "tool_candidates": [tool["function"]["name"] for tool in runtime_tools],
+                },
+            )
             completion = await self.openai.chat.completions.create(
                 **openai_kwargs,
             )
             choice = completion.choices[0]
             assistant_message = choice.message.model_dump(exclude_none=True)
+            reasoning_text = self._extract_reasoning_text(choice.message, assistant_message)
+            assistant_message = self._sanitize_assistant_message(assistant_message)
             messages.append(assistant_message)
             conversation.messages.append(assistant_message)
 
             tool_calls = choice.message.tool_calls or []
+            self._record_step(
+                steps,
+                kind="thinking",
+                label="model_planning",
+                status="completed",
+                detail=self._thinking_detail(reasoning_text),
+                metadata={
+                    "run_id": run_id,
+                    "round": round_index,
+                    "tool_call_count": len(tool_calls),
+                    "reasoning_content_available": bool(reasoning_text),
+                    "reasoning_content_exposed": bool(reasoning_text and self.settings.expose_reasoning_content),
+                },
+            )
             if not tool_calls:
                 content = choice.message.content or ""
                 conversation.updated_at = datetime.now(timezone.utc)
+                self._record_step(
+                    steps,
+                    kind="final",
+                    label="assistant_response",
+                    status="completed",
+                    detail="Model returned a final assistant message.",
+                    metadata={"run_id": run_id, "content_length": len(content)},
+                )
                 return ChatResponse(
                     conversation_id=conversation.id,
                     agent_id=agent.id,
                     message=content,
+                    steps=steps,
                     tool_calls=traces,
                     model=self.settings.model,
                 )
@@ -182,8 +231,10 @@ class AgentRuntime:
                         "role": "system",
                         "content": self._build_system_prompt(agent, available_skills, activated_skills),
                     }
+                    self._record_call_step(steps, run_id, "runtime_call", tool_name, call.id, result)
                 elif tool_name == "read_skill_resource":
                     result = self._read_skill_resource(args, activated_skills)
+                    self._record_call_step(steps, run_id, "runtime_call", tool_name, call.id, result)
                 elif tool_name == "request_user_input":
                     question = str(args.get("question", "")).strip() or "请补充继续执行所需的信息。"
                     fields = self._parse_requested_fields(args.get("fields"))
@@ -199,6 +250,18 @@ class AgentRuntime:
                         "fields": result["fields"],
                         "run_id": run_id,
                     }
+                    self._record_step(
+                        steps,
+                        kind="waiting_for_user",
+                        label="request_user_input",
+                        status="waiting",
+                        detail=question,
+                        metadata={
+                            "run_id": run_id,
+                            "field_names": [field.name for field in fields],
+                        },
+                        tool_call_id=call.id,
+                    )
                     traces.append(
                         ToolCallTrace(
                             tool_call_id=call.id,
@@ -225,6 +288,7 @@ class AgentRuntime:
                         message=question,
                         status="waiting_for_user",
                         requested_inputs=fields,
+                        steps=steps,
                         tool_calls=traces,
                         model=self.settings.model,
                     )
@@ -232,8 +296,10 @@ class AgentRuntime:
                     skill = skill_by_name.get(tool_name)
                     if skill is None:
                         result = {"success": False, "error": f"Executable skill is not available: {tool_name}"}
+                        self._record_call_step(steps, run_id, "runtime_call", tool_name, call.id, result)
                     elif not is_allowed(skill.permissions, request.user):
                         result = {"success": False, "error": f"Permission denied for skill: {tool_name}"}
+                        self._record_call_step(steps, run_id, "runtime_call", tool_name, call.id, result)
                     else:
                         script = self.registry.read_skill_entrypoint(skill)
                         result = await self.runner.execute_skill(
@@ -252,6 +318,15 @@ class AgentRuntime:
                         if isinstance(execution, dict):
                             execution_id = execution.get("execution_id")
                             self.executions.append(execution)
+                        self._record_call_step(
+                            steps,
+                            run_id,
+                            "sandbox_execution",
+                            tool_name,
+                            call.id,
+                            result,
+                            execution_id=execution_id,
+                        )
                 traces.append(
                     ToolCallTrace(
                         tool_call_id=call.id,
@@ -272,10 +347,19 @@ class AgentRuntime:
         final_message = "runtime 调用轮次超过上限，已停止。请缩小问题范围或提高 AGENT_RUNTIME_MAX_RUNTIME_ROUNDS。"
         conversation.messages.append({"role": "assistant", "content": final_message})
         conversation.updated_at = datetime.now(timezone.utc)
+        self._record_step(
+            steps,
+            kind="final",
+            label="runtime_round_limit",
+            status="failed",
+            detail=final_message,
+            metadata={"run_id": run_id, "max_runtime_rounds": self.settings.max_runtime_rounds},
+        )
         return ChatResponse(
             conversation_id=conversation.id,
             agent_id=agent.id,
             message=final_message,
+            steps=steps,
             tool_calls=traces,
             model=self.settings.model,
         )
@@ -467,3 +551,94 @@ class AgentRuntime:
             "Treat the latest user message as the user's answer to that request. "
             "Continue the same workflow if sufficient; call request_user_input again only if required information is still missing."
         )
+
+    def _record_call_step(
+        self,
+        steps: list[RuntimeStepTrace],
+        run_id: str,
+        kind: str,
+        label: str,
+        tool_call_id: str,
+        result: dict[str, Any],
+        *,
+        execution_id: str | None = None,
+    ) -> None:
+        success = result.get("success") if isinstance(result, dict) else None
+        self._record_step(
+            steps,
+            kind=kind,
+            label=label,
+            status="completed" if success is not False else "failed",
+            detail=str(result.get("error") or result.get("phase") or ""),
+            metadata={
+                "run_id": run_id,
+                "success": success,
+                "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
+            },
+            tool_call_id=tool_call_id,
+            execution_id=execution_id,
+        )
+
+    def _record_step(
+        self,
+        steps: list[RuntimeStepTrace],
+        *,
+        kind: str,
+        label: str,
+        status: str = "completed",
+        detail: str = "",
+        metadata: dict[str, Any] | None = None,
+        tool_call_id: str | None = None,
+        execution_id: str | None = None,
+    ) -> RuntimeStepTrace:
+        step = RuntimeStepTrace(
+            step_id=f"step_{len(steps) + 1:03d}",
+            kind=kind,
+            label=label,
+            status=status,
+            detail=detail,
+            metadata=metadata or {},
+            tool_call_id=tool_call_id,
+            execution_id=execution_id,
+        )
+        steps.append(step)
+        logger.info(
+            "runtime_step step_id=%s kind=%s label=%s status=%s tool_call_id=%s execution_id=%s detail=%s metadata=%s",
+            step.step_id,
+            step.kind,
+            step.label,
+            step.status,
+            step.tool_call_id,
+            step.execution_id,
+            step.detail,
+            json.dumps(step.metadata, ensure_ascii=False, default=str),
+        )
+        return step
+
+    def _thinking_detail(self, reasoning_text: str | None) -> str:
+        if reasoning_text and self.settings.expose_reasoning_content:
+            return reasoning_text
+        if reasoning_text:
+            return "Model reasoning content was returned by the provider but is redacted by AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=false."
+        return "Model planning completed; this provider did not return explicit reasoning content."
+
+    @staticmethod
+    def _extract_reasoning_text(message: Any, assistant_message: dict[str, Any]) -> str | None:
+        candidates = [
+            assistant_message.get("reasoning_content"),
+            assistant_message.get("reasoning"),
+        ]
+        model_extra = getattr(message, "model_extra", None)
+        if isinstance(model_extra, dict):
+            candidates.extend([model_extra.get("reasoning_content"), model_extra.get("reasoning")])
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return None
+
+    @staticmethod
+    def _sanitize_assistant_message(message: dict[str, Any]) -> dict[str, Any]:
+        sanitized = dict(message)
+        sanitized.pop("reasoning_content", None)
+        sanitized.pop("reasoning", None)
+        return sanitized

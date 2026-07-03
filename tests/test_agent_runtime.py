@@ -5,7 +5,7 @@ import json
 
 from agent_runtime.agent import AgentRuntime
 from agent_runtime.app import app
-from agent_runtime.config import AgentRuntimeSettings
+from agent_runtime.config import AgentRuntimeSettings, load_settings
 from agent_runtime.models import ChatRequest, PermissionPolicy, SkillSummary, UserContext
 from agent_runtime.permissions import is_allowed
 from agent_runtime.registry import FileRegistry
@@ -41,6 +41,9 @@ def make_settings(tmp_path) -> AgentRuntimeSettings:
         host="127.0.0.1",
         port=8010,
         model="test-model",
+        openai_base_url=None,
+        reasoning_effort=None,
+        expose_reasoning_content=False,
         registry_dir=registry_dir,
         sandbox_url="http://127.0.0.1:8001",
         admin_token=None,
@@ -95,6 +98,33 @@ def test_permissions_require_all_scopes():
     assert not is_allowed(policy, UserContext(scopes=["skills:execute"]))
 
 
+def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "AGENT_RUNTIME_MODEL=test-reasoning-model",
+                "AGENT_RUNTIME_OPENAI_BASE_URL=https://llm-gateway.example/v1",
+                "AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=true",
+                f"AGENT_RUNTIME_REGISTRY_DIR={tmp_path / 'registry'}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENT_RUNTIME_ENV_FILE", str(env_file))
+    monkeypatch.delenv("AGENT_RUNTIME_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_RUNTIME_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("AGENT_RUNTIME_EXPOSE_REASONING_CONTENT", raising=False)
+    monkeypatch.delenv("AGENT_RUNTIME_REGISTRY_DIR", raising=False)
+
+    settings = load_settings()
+
+    assert settings.model == "test-reasoning-model"
+    assert settings.openai_base_url == "https://llm-gateway.example/v1"
+    assert settings.expose_reasoning_content is True
+
+
 def test_activate_skill_returns_full_harness_without_backend_parsing(tmp_path):
     settings = make_settings(tmp_path)
     body = "When the question is about steel markets, decide the analysis workflow from this text."
@@ -139,6 +169,9 @@ def test_request_user_input_pauses_and_records_tool_result(tmp_path):
     assert response.status == "waiting_for_user"
     assert response.message == "需要哪个表达式？"
     assert response.requested_inputs[0].name == "expression"
+    assert response.steps
+    assert any(step.kind == "thinking" for step in response.steps)
+    assert any(step.kind == "waiting_for_user" for step in response.steps)
     assert conversation.pending_input_request is not None
     assert tool_messages
     assert json.loads(tool_messages[-1]["content"])["status"] == "waiting_for_user"
