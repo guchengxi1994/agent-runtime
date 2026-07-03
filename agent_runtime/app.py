@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .agent import AgentRequestError, AgentRuntime
 from .config import load_settings
-from .models import ChatRequest, ChatResponse, SkillPackage, ToolDefinition, UserContext
+from .models import AgentDefinition, ChatRequest, ChatResponse, SkillPackage, UserContext
 from .registry import FileRegistry, RegistryError
 
 settings = load_settings()
@@ -49,12 +49,14 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "mode": "server_chat_runtime",
         "model": settings.model,
-        "plugin_server_url": settings.plugin_server_url,
         "registry_dir": str(settings.registry_dir),
+        "sandbox_url": settings.sandbox_url,
         "admin_auth_enabled": settings.admin_auth_enabled,
-        "tools": len(registry.tools),
+        "agents": len(registry.agents) or 1,
         "skills": len(registry.skills),
+        "executable_skills": sum(1 for skill in registry.skills.values() if skill.executable),
         "conversations": len(runtime.conversations),
+        "executions": len(runtime.executions),
     }
 
 
@@ -64,16 +66,16 @@ async def reload_registry(_: Annotated[None, Depends(require_admin)]) -> dict[st
         registry.reload()
     except RegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"success": True, "tools": len(registry.tools), "skills": len(registry.skills)}
+    return {"success": True, "agents": len(registry.agents) or 1, "skills": len(registry.skills)}
 
 
-@app.post("/admin/tools")
-async def register_tool(
-    tool: ToolDefinition,
+@app.post("/admin/agents")
+async def register_agent(
+    agent: AgentDefinition,
     _: Annotated[None, Depends(require_admin)],
 ) -> dict[str, object]:
-    registry.save_tool(tool)
-    return {"success": True, "id": tool.id}
+    registry.save_agent(agent)
+    return {"success": True, "id": agent.id}
 
 
 @app.post("/admin/skills")
@@ -85,14 +87,19 @@ async def register_skill(
     return {"success": True, "name": name}
 
 
-@app.get("/tools")
-async def list_tools() -> dict[str, object]:
-    return {"tools": [tool.model_dump() for tool in registry.tool_summaries(UserContext())]}
+@app.get("/agents")
+async def list_agents() -> dict[str, object]:
+    return {"agents": [agent.model_dump() for agent in registry.agent_summaries(UserContext())]}
 
 
 @app.get("/skills")
 async def list_skills() -> dict[str, object]:
     return {"skills": [skill.model_dump() for skill in registry.skill_summaries(UserContext())]}
+
+
+@app.get("/executions")
+async def list_executions() -> dict[str, object]:
+    return {"executions": runtime.executions[-100:]}
 
 
 @app.post("/chat", response_model=ChatResponse)

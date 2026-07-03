@@ -9,24 +9,27 @@ from openai import AsyncOpenAI
 
 from .config import AgentRuntimeSettings
 from .models import (
+    AgentDefinition,
     ChatRequest,
     ChatResponse,
     ConversationState,
     SkillDefinition,
+    SkillExecutionContext,
     ToolCallTrace,
-    ToolDefinition,
 )
 from .permissions import is_allowed
 from .registry import FileRegistry
-from .runner_client import PluginRunnerClient
+from .runner_client import SandboxClient
 
 
 BASE_SYSTEM_PROMPT = """You are an enterprise agent runtime.
-You answer users through chat and may activate skills or call tools when useful.
-Skills are server-provided harness documents. The skill catalog only contains names and descriptions. If a skill may be relevant, call `activate_skill` to load the complete SKILL.md before applying it.
-After a skill is activated, follow its harness document. Let the harness guide whether tools are needed and in what order.
-Only use the skills and tools provided in this request. Do not invent skills or tools.
-If a requested action requires unavailable data, permissions, or tools, say what is missing.
+You answer users through chat and may activate harness skills or execute executable skills when useful.
+Skills are server-provided capability documents. Some skills are harness-only and some are executable.
+If a harness skill may be relevant, call `activate_skill` to load the complete SKILL.md before applying it.
+After a skill is activated, follow its harness document. Let the harness guide whether executable skills are needed and in what order.
+If required user input is missing, call `request_user_input` instead of guessing.
+Only use the skills provided in this request. Do not invent skills.
+If a requested action requires unavailable data, permissions, or executable skills, say what is missing.
 Return concise, actionable answers."""
 
 ACTIVATE_SKILL_TOOL = {
@@ -69,6 +72,40 @@ READ_SKILL_RESOURCE_TOOL = {
         },
     },
 }
+REQUEST_USER_INPUT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "request_user_input",
+        "description": "Pause the current run and ask the user for missing information required to continue.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "A concise question to ask the user.",
+                },
+                "fields": {
+                    "type": "array",
+                    "description": "Structured fields the user should provide.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "label": {"type": "string"},
+                            "type": {"type": "string", "enum": ["string", "number", "integer", "boolean", "object", "array"]},
+                            "required": {"type": "boolean"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["question"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 class AgentRequestError(ValueError):
@@ -80,26 +117,34 @@ class AgentRuntime:
         self.settings = settings
         self.registry = registry
         self.openai = AsyncOpenAI()
-        self.runner = PluginRunnerClient(settings.plugin_server_url, settings.request_timeout_seconds)
+        self.runner = SandboxClient(settings.sandbox_url, settings.request_timeout_seconds)
         self.conversations: dict[str, ConversationState] = {}
+        self.executions: list[dict[str, Any]] = []
 
     async def chat(self, request: ChatRequest) -> ChatResponse:
-        conversation = self._get_or_create_conversation(request)
-        available_skills = self._available_skills(request)
+        agent = self._resolve_agent(request)
+        conversation = self._get_or_create_conversation(request, agent)
+        run_id = f"run_{uuid.uuid4().hex}"
+        available_skills = self._available_skills(request, agent)
         activated_skills = self._explicit_or_active_skills(request, conversation, available_skills)
-        tools = self._select_tools(request)
+        pending_input_request = conversation.pending_input_request
+        conversation.pending_input_request = None
 
         conversation.messages.append({"role": "user", "content": request.message})
         conversation.updated_at = datetime.now(timezone.utc)
 
         messages = [
-            {"role": "system", "content": self._build_system_prompt(available_skills, activated_skills)}
-        ] + conversation.messages
+            {"role": "system", "content": self._build_system_prompt(agent, available_skills, activated_skills)}
+        ]
+        if pending_input_request:
+            messages.append({"role": "system", "content": self._build_pending_input_prompt(pending_input_request)})
+        messages.extend(conversation.messages)
         traces: list[ToolCallTrace] = []
 
-        for _ in range(self.settings.max_tool_rounds + 1):
-            runtime_tools = self._runtime_tools(tools, bool(available_skills))
-            tool_by_name = {tool.name: tool for tool in tools}
+        for _ in range(self.settings.max_runtime_rounds + 1):
+            executable_skills = self._select_executable_skills(request, agent, available_skills)
+            runtime_tools = self._runtime_tools(executable_skills, bool(available_skills))
+            skill_by_name = {skill.name: skill for skill in executable_skills}
             openai_kwargs: dict[str, Any] = {
                 "model": self.settings.model,
                 "messages": messages,
@@ -121,6 +166,7 @@ class AgentRuntime:
                 conversation.updated_at = datetime.now(timezone.utc)
                 return ChatResponse(
                     conversation_id=conversation.id,
+                    agent_id=agent.id,
                     message=content,
                     tool_calls=traces,
                     model=self.settings.model,
@@ -129,24 +175,90 @@ class AgentRuntime:
             for call in tool_calls:
                 tool_name = call.function.name
                 args = self._parse_tool_arguments(call.function.arguments)
+                execution_id: str | None = None
                 if tool_name == "activate_skill":
                     result = self._activate_skill(args, available_skills, activated_skills, conversation)
+                    messages[0] = {
+                        "role": "system",
+                        "content": self._build_system_prompt(agent, available_skills, activated_skills),
+                    }
                 elif tool_name == "read_skill_resource":
                     result = self._read_skill_resource(args, activated_skills)
+                elif tool_name == "request_user_input":
+                    question = str(args.get("question", "")).strip() or "请补充继续执行所需的信息。"
+                    fields = self._parse_requested_fields(args.get("fields"))
+                    result = {
+                        "success": True,
+                        "status": "waiting_for_user",
+                        "question": question,
+                        "fields": [field.model_dump() for field in fields],
+                        "run_id": run_id,
+                    }
+                    conversation.pending_input_request = {
+                        "question": question,
+                        "fields": result["fields"],
+                        "run_id": run_id,
+                    }
+                    traces.append(
+                        ToolCallTrace(
+                            tool_call_id=call.id,
+                            tool_name=tool_name,
+                            arguments=args,
+                            result=result,
+                            execution_id=None,
+                        )
+                    )
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": json.dumps(result, ensure_ascii=False),
+                    }
+                    assistant_question = {"role": "assistant", "content": question}
+                    messages.append(tool_message)
+                    messages.append(assistant_question)
+                    conversation.messages.append(tool_message)
+                    conversation.messages.append(assistant_question)
+                    conversation.updated_at = datetime.now(timezone.utc)
+                    return ChatResponse(
+                        conversation_id=conversation.id,
+                        agent_id=agent.id,
+                        message=question,
+                        status="waiting_for_user",
+                        requested_inputs=fields,
+                        tool_calls=traces,
+                        model=self.settings.model,
+                    )
                 else:
-                    tool = tool_by_name.get(tool_name)
-                    if tool is None:
-                        result = {"success": False, "error": f"Tool is not available: {tool_name}"}
-                    elif not is_allowed(tool.permissions, request.user):
-                        result = {"success": False, "error": f"Permission denied for tool: {tool_name}"}
+                    skill = skill_by_name.get(tool_name)
+                    if skill is None:
+                        result = {"success": False, "error": f"Executable skill is not available: {tool_name}"}
+                    elif not is_allowed(skill.permissions, request.user):
+                        result = {"success": False, "error": f"Permission denied for skill: {tool_name}"}
                     else:
-                        result = await self.runner.execute(tool, args)
+                        script = self.registry.read_skill_entrypoint(skill)
+                        result = await self.runner.execute_skill(
+                            skill,
+                            args,
+                            SkillExecutionContext(
+                                agent_id=agent.id,
+                                conversation_id=conversation.id,
+                                user_id=request.user.id,
+                                run_id=run_id,
+                            ),
+                            script,
+                            base_policy=agent.execution_policy,
+                        )
+                        execution = result.get("execution") if isinstance(result, dict) else None
+                        if isinstance(execution, dict):
+                            execution_id = execution.get("execution_id")
+                            self.executions.append(execution)
                 traces.append(
                     ToolCallTrace(
                         tool_call_id=call.id,
                         tool_name=tool_name,
                         arguments=args,
                         result=result,
+                        execution_id=execution_id,
                     )
                 )
                 tool_message = {
@@ -157,26 +269,54 @@ class AgentRuntime:
                 messages.append(tool_message)
                 conversation.messages.append(tool_message)
 
-        final_message = "工具调用轮次超过上限，已停止。请缩小问题范围或提高 AGENT_RUNTIME_MAX_TOOL_ROUNDS。"
+        final_message = "runtime 调用轮次超过上限，已停止。请缩小问题范围或提高 AGENT_RUNTIME_MAX_RUNTIME_ROUNDS。"
         conversation.messages.append({"role": "assistant", "content": final_message})
         conversation.updated_at = datetime.now(timezone.utc)
         return ChatResponse(
             conversation_id=conversation.id,
+            agent_id=agent.id,
             message=final_message,
             tool_calls=traces,
             model=self.settings.model,
         )
 
-    def _get_or_create_conversation(self, request: ChatRequest) -> ConversationState:
+    def _resolve_agent(self, request: ChatRequest) -> AgentDefinition:
+        try:
+            agent = self.registry.get_agent(request.agent_id)
+        except Exception as exc:
+            raise AgentRequestError(str(exc)) from exc
+        if not agent.enabled or not is_allowed(agent.permissions, request.user):
+            raise AgentRequestError(f"Agent unavailable or permission denied: {request.agent_id}")
+        return agent
+
+    def _get_or_create_conversation(
+        self,
+        request: ChatRequest,
+        agent: AgentDefinition | None = None,
+    ) -> ConversationState:
+        agent = agent or self._resolve_agent(request)
         if request.conversation_id and request.conversation_id in self.conversations:
-            return self.conversations[request.conversation_id]
+            conversation = self.conversations[request.conversation_id]
+            if conversation.agent_id != agent.id:
+                raise AgentRequestError(
+                    f"Conversation {conversation.id} belongs to agent {conversation.agent_id}, not {agent.id}"
+                )
+            return conversation
         conversation_id = request.conversation_id or f"conv_{uuid.uuid4().hex}"
-        conversation = ConversationState(id=conversation_id)
+        conversation = ConversationState(id=conversation_id, agent_id=agent.id)
         self.conversations[conversation_id] = conversation
         return conversation
 
-    def _available_skills(self, request: ChatRequest) -> dict[str, SkillDefinition]:
-        return {skill.name: skill for skill in self.registry.accessible_skills(request.user)}
+    def _available_skills(
+        self,
+        request: ChatRequest,
+        agent: AgentDefinition | None = None,
+    ) -> dict[str, SkillDefinition]:
+        agent = agent or self._resolve_agent(request)
+        skills = {skill.name: skill for skill in self.registry.accessible_skills(request.user)}
+        if agent.skill_ids is not None:
+            skills = {name: skill for name, skill in skills.items() if name in set(agent.skill_ids)}
+        return skills
 
     def _explicit_or_active_skills(
         self,
@@ -191,21 +331,28 @@ class AgentRuntime:
             return [accessible[skill_id] for skill_id in request.skill_ids]
         return [accessible[skill_id] for skill_id in conversation.active_skill_ids if skill_id in accessible]
 
-    def _select_tools(self, request: ChatRequest) -> list[ToolDefinition]:
-        accessible = {tool.id: tool for tool in self.registry.accessible_tools(request.user)}
-        if request.tool_ids is not None:
-            missing = [tool_id for tool_id in request.tool_ids if tool_id not in accessible]
-            if missing:
-                raise AgentRequestError(f"Tool unavailable or permission denied: {', '.join(missing)}")
-            return [accessible[tool_id] for tool_id in request.tool_ids]
-        return list(accessible.values())
+    def _select_executable_skills(
+        self,
+        request: ChatRequest,
+        agent: AgentDefinition,
+        available_skills: dict[str, SkillDefinition],
+    ) -> list[SkillDefinition]:
+        return [skill for skill in available_skills.values() if skill.executable]
 
     def _build_system_prompt(
         self,
+        agent: AgentDefinition,
         available_skills: dict[str, SkillDefinition],
         activated_skills: list[SkillDefinition],
     ) -> str:
         parts = [BASE_SYSTEM_PROMPT]
+        parts.append(
+            "Current agent:\n"
+            f"- id: {agent.id}\n"
+            f"- name: {agent.name}\n"
+            f"- description: {agent.description or 'No description'}\n"
+            "The server exposes executable skills as callable functions and harness skills through activate_skill."
+        )
         if available_skills:
             catalog = [
                 f"- {skill.name}: {skill.description}"
@@ -224,8 +371,8 @@ class AgentRuntime:
         parts.append("Activated skills:\n\n" + "\n\n".join(skill_blocks))
         return "\n\n".join(parts)
 
-    def _runtime_tools(self, tools: list[ToolDefinition], include_skill_activation: bool) -> list[dict[str, Any]]:
-        result = [tool.to_openai_tool() for tool in tools]
+    def _runtime_tools(self, executable_skills: list[SkillDefinition], include_skill_activation: bool) -> list[dict[str, Any]]:
+        result = [REQUEST_USER_INPUT_TOOL, *[skill.to_openai_tool() for skill in executable_skills]]
         if include_skill_activation:
             result.insert(0, ACTIVATE_SKILL_TOOL)
             result.insert(1, READ_SKILL_RESOURCE_TOOL)
@@ -284,3 +431,39 @@ class AgentRuntime:
         except json.JSONDecodeError:
             return {"_raw_arguments": raw}
         return parsed if isinstance(parsed, dict) else {"value": parsed}
+
+    @staticmethod
+    def _parse_requested_fields(raw: Any) -> list[Any]:
+        from .models import RequestedInputField
+
+        if not isinstance(raw, list):
+            return []
+        fields = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            fields.append(
+                RequestedInputField(
+                    name=name,
+                    label=str(item.get("label", "")).strip() or None,
+                    type=str(item.get("type", "string")).strip() or "string",
+                    required=item.get("required") if isinstance(item.get("required"), bool) else True,
+                    description=str(item.get("description", "")).strip(),
+                )
+            )
+        return fields
+
+    @staticmethod
+    def _build_pending_input_prompt(pending_input_request: dict[str, Any]) -> str:
+        question = str(pending_input_request.get("question", "")).strip()
+        fields = pending_input_request.get("fields") if isinstance(pending_input_request.get("fields"), list) else []
+        return (
+            "The previous runtime step paused with request_user_input.\n"
+            f"Question asked to the user: {question or 'N/A'}\n"
+            f"Requested fields: {json.dumps(fields, ensure_ascii=False)}\n"
+            "Treat the latest user message as the user's answer to that request. "
+            "Continue the same workflow if sufficient; call request_user_input again only if required information is still missing."
+        )

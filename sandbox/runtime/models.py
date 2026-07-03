@@ -27,6 +27,7 @@ class ExecutionConfig:
     pip_trusted_host: str | None
     keep_venv: bool
     env: dict[str, str]
+    venv_key: str | None = None
 
 
 @dataclass

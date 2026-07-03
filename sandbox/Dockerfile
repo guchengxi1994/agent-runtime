@@ -13,12 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 RUN groupadd --gid "${ARTISAN_GID}" artisan \
     && useradd --uid "${ARTISAN_UID}" --gid "${ARTISAN_GID}" --create-home --shell /usr/sbin/nologin artisan
 
-COPY plugin_server_python/requirements.txt ./requirements.txt
+COPY sandbox/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple
 
-COPY plugin_server_python/app.py ./app.py
-COPY plugin_server_python/runner.py ./runner.py
-COPY plugin_server_python/runtime ./runtime
+COPY sandbox/app.py ./app.py
+COPY sandbox/runner.py ./runner.py
+COPY sandbox/runtime ./runtime
 
 RUN mkdir -p /app/plugins_runtime/venvs \
     /app/plugins_runtime/scripts \
@@ -28,6 +28,8 @@ RUN mkdir -p /app/plugins_runtime/venvs \
 
 USER artisan
 
-EXPOSE 8002
+ENV ARTISAN_PLUGIN_SERVER_PORT=8001
+
+EXPOSE 8001
 
 CMD ["python", "app.py"]

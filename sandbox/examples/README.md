@@ -1,6 +1,6 @@
-# Python Plugin Runtime Demos
+# Python Sandbox Runtime Demos
 
-这些示例主要用于验证 `plugin_server_python` 的隔离和限制是否生效，不是业务型插件。
+这些示例主要用于验证 `sandbox` 的隔离和限制是否生效，不是业务型 skill。
 
 ## 文件说明
 
@@ -180,4 +180,4 @@
 
 如果你走 `POST /execute`，把示例脚本内容放到 `script` 字段，再把对应 `.json` 里的 `params` 和 `execution_policy` 合进去即可。
 
-如果你走上层 backend 的插件执行代理接口，可以先把脚本存进 backend 的插件表，再由 backend 转发到运行时。
+如果你走上层 `agent_runtime`，应该把业务能力注册成 executable skill，再由 runtime 转发到 sandbox。

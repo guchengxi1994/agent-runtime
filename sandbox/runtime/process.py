@@ -810,7 +810,22 @@ async def ensure_venv(
     plugin_id: str,
     stdout_queue: asyncio.Queue[dict[str, Any]] | None = None,
 ) -> Path:
-    venv_dir = workspace.venv_dir
+    venv_dir = settings.venv_root / config.venv_key if config.venv_key else workspace.venv_dir
+    if config.venv_key and get_venv_python(venv_dir).is_file():
+        await emit_runtime_event(
+            stdout_queue,
+            event="venv",
+            data={
+                "plugin_id": plugin_id,
+                "phase": PHASE_PRE_EXECUTE,
+                "line": f"Reusing cached venv: {config.venv_key}",
+                "venv_key": config.venv_key,
+                "venv_dir": str(venv_dir),
+            },
+        )
+        logger.info("[%s] Reusing cached venv: key=%s, venv_dir=%s", plugin_id, config.venv_key, venv_dir)
+        return venv_dir
+
     pre_phase = await emit_phase_event(
         stdout_queue,
         plugin_id,
@@ -819,6 +834,7 @@ async def ensure_venv(
         step="create_venv",
         workspace=str(workspace.root),
         venv_dir=str(venv_dir),
+        venv_key=config.venv_key,
     )
     logger.info("[%s] Creating venv: workspace=%s, venv_dir=%s", plugin_id, workspace.root, venv_dir)
     create_command = [sys.executable, "-m", "venv", "--without-pip", str(venv_dir)]

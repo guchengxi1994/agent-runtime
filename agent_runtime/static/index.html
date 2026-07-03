@@ -13,7 +13,7 @@
           <p class="eyebrow">Enterprise Agent Runtime</p>
           <h1>Harness-driven analysis console</h1>
           <p class="hero-copy">
-            让模型先发现 skill catalog，再按需激活完整 SKILL.md harness，并基于可用工具完成分析链路。
+            让模型先发现 skill catalog，再按需激活 harness 或直接调用 executable skill 完成分析链路。
           </p>
         </div>
         <div class="health-card" id="healthCard">
@@ -29,19 +29,11 @@
         <aside class="sidebar">
           <section class="panel">
             <div class="panel-title">
-              <span>Skill Harness</span>
+              <span>Skill Catalog</span>
               <button class="ghost" id="refreshCatalog" type="button">刷新</button>
             </div>
-            <p class="hint">默认让模型自行选择并调用 <code>activate_skill</code>。点选后会强制注入指定 harness。</p>
+            <p class="hint">默认让模型自行选择。复杂流程可先激活 harness；明确任务可直接调用 executable skill。</p>
             <div class="card-list" id="skillList"></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-title">
-              <span>Tool Catalog</span>
-            </div>
-            <p class="hint">不点选时暴露当前用户可访问的全部工具；点选后只暴露选中工具。</p>
-            <div class="tool-list" id="toolList"></div>
           </section>
 
           <section class="panel compact">
@@ -62,7 +54,7 @@
             </label>
             <label>
               Scopes
-              <input id="scopes" placeholder="tools:run,market:read" />
+              <input id="scopes" placeholder="skills:execute,market:read" />
             </label>
           </section>
         </aside>
@@ -86,7 +78,7 @@
           </div>
 
           <form class="composer" id="chatForm">
-            <textarea id="messageInput" rows="4" placeholder="输入需求：例如，帮我做炼钢效率分析，先判断需要哪些数据和工具..."></textarea>
+            <textarea id="messageInput" rows="4" placeholder="输入需求：例如，帮我做炼钢效率分析，先判断需要哪些数据和 executable skill..."></textarea>
             <div class="composer-actions">
               <div class="conversation-id" id="conversationId">conversation: new</div>
               <button class="primary" id="sendButton" type="submit">发送</button>
@@ -95,11 +87,11 @@
 
           <section class="trace-panel">
             <div class="panel-title">
-              <span>Tool Trace</span>
+              <span>Execution Trace</span>
               <button class="ghost" id="clearTrace" type="button">清空</button>
             </div>
             <div id="traceList" class="trace-list">
-              <p class="hint">工具调用、skill 激活和 runner 结果会显示在这里。</p>
+              <p class="hint">skill 激活、用户输入请求和 sandbox 执行结果会显示在这里。</p>
             </div>
           </section>
         </section>

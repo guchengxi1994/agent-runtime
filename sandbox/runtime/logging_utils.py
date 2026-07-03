@@ -16,4 +16,4 @@ def setup_logging() -> None:
     )
 
 
-logger = logging.getLogger("artisan.plugin_server_python")
+logger = logging.getLogger("agent_runtime.sandbox")

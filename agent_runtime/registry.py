@@ -6,13 +6,13 @@ import yaml
 from pydantic import ValidationError
 
 from .models import (
+    AgentDefinition,
+    AgentSummary,
     PermissionPolicy,
     SkillDefinition,
     SkillPackage,
     SkillResource,
     SkillSummary,
-    ToolDefinition,
-    ToolSummary,
     UserContext,
 )
 from .permissions import is_allowed
@@ -25,25 +25,25 @@ class RegistryError(RuntimeError):
 class FileRegistry:
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.tools_dir = root / "tools"
         self.skills_dir = root / "skills"
-        self.tools: dict[str, ToolDefinition] = {}
+        self.agents_dir = root / "agents"
+        self.agents: dict[str, AgentDefinition] = {}
         self.skills: dict[str, SkillDefinition] = {}
 
     def reload(self) -> None:
-        self.tools = self._load_tools()
+        self.agents = self._load_agents()
         self.skills = self._load_skills()
 
-    def _load_tools(self) -> dict[str, ToolDefinition]:
-        tools: dict[str, ToolDefinition] = {}
-        for path in sorted(self.tools_dir.glob("*.json")):
-            tool = ToolDefinition.model_validate_json(path.read_text(encoding="utf-8"))
-            if tool.id in tools:
-                raise RegistryError(f"Duplicate tool id: {tool.id}")
-            if any(existing.name == tool.name for existing in tools.values()):
-                raise RegistryError(f"Duplicate tool name: {tool.name}")
-            tools[tool.id] = tool
-        return tools
+    def _load_agents(self) -> dict[str, AgentDefinition]:
+        agents: dict[str, AgentDefinition] = {}
+        if not self.agents_dir.exists():
+            return agents
+        for path in sorted(self.agents_dir.glob("*.json")):
+            agent = AgentDefinition.model_validate_json(path.read_text(encoding="utf-8"))
+            if agent.id in agents:
+                raise RegistryError(f"Duplicate agent id: {agent.id}")
+            agents[agent.id] = agent
+        return agents
 
     def _load_skills(self) -> dict[str, SkillDefinition]:
         skills: dict[str, SkillDefinition] = {}
@@ -73,6 +73,7 @@ class FileRegistry:
         if not isinstance(metadata, dict):
             raise RegistryError(f"Skill {name} metadata must be an object")
         permissions = extract_permissions(metadata)
+        runtime_meta = extract_runtime_metadata(metadata)
 
         try:
             return SkillDefinition.model_validate(
@@ -82,6 +83,17 @@ class FileRegistry:
                     "enabled": normalize_enabled(metadata),
                     "permissions": permissions,
                     "metadata": metadata,
+                    "capability_hints": normalize_string_list(
+                        runtime_meta.get("capabilities") or runtime_meta.get("capability_hints")
+                    ),
+                    "executable": normalize_bool(runtime_meta.get("executable"), False),
+                    "parameters_schema": normalize_object(
+                        runtime_meta.get("parameters_schema") or runtime_meta.get("parameters"),
+                        {"type": "object", "properties": {}, "additionalProperties": False},
+                    ),
+                    "execution_policy": normalize_object(runtime_meta.get("execution_policy"), {}),
+                    "required_secrets": normalize_string_map(runtime_meta.get("required_secrets")),
+                    "entrypoint": normalize_optional_string(runtime_meta.get("entrypoint")) or "skill.py",
                     "body": body,
                     "resources": discover_skill_resources(skill_dir),
                     "skill_dir": str(skill_dir),
@@ -91,9 +103,9 @@ class FileRegistry:
         except ValidationError as exc:
             raise RegistryError(f"Invalid skill package {skill_dir}: {exc}") from exc
 
-    def save_tool(self, tool: ToolDefinition) -> None:
-        path = self.tools_dir / f"{tool.id}.json"
-        path.write_text(tool.model_dump_json(indent=2), encoding="utf-8")
+    def save_agent(self, agent: AgentDefinition) -> None:
+        path = self.agents_dir / f"{agent.id}.json"
+        path.write_text(agent.model_dump_json(indent=2), encoding="utf-8")
         self.reload()
 
     def save_skill(self, skill: SkillPackage) -> str:
@@ -105,23 +117,35 @@ class FileRegistry:
         self.reload()
         return name
 
-    def accessible_tools(self, user: UserContext) -> list[ToolDefinition]:
-        return [tool for tool in self.tools.values() if tool.enabled and is_allowed(tool.permissions, user)]
+    def get_agent(self, agent_id: str) -> AgentDefinition:
+        agent = self.agents.get(agent_id)
+        if agent is not None:
+            return agent
+        if agent_id == "default":
+            return AgentDefinition(id="default", name="Default Agent", description="Default runtime agent")
+        raise RegistryError(f"Agent not found: {agent_id}")
+
+    def accessible_agents(self, user: UserContext) -> list[AgentDefinition]:
+        loaded_agents = [agent for agent in self.agents.values() if agent.enabled and is_allowed(agent.permissions, user)]
+        if loaded_agents:
+            return loaded_agents
+        default_agent = AgentDefinition(id="default", name="Default Agent", description="Default runtime agent")
+        return [default_agent] if is_allowed(default_agent.permissions, user) else []
 
     def accessible_skills(self, user: UserContext) -> list[SkillDefinition]:
         return [skill for skill in self.skills.values() if skill.enabled and is_allowed(skill.permissions, user)]
 
-    def tool_summaries(self, user: UserContext) -> list[ToolSummary]:
+    def agent_summaries(self, user: UserContext) -> list[AgentSummary]:
         return [
-            ToolSummary(
-                id=tool.id,
-                name=tool.name,
-                description=tool.description,
-                enabled=tool.enabled,
-                permissions=tool.permissions,
-                metadata=tool.metadata,
+            AgentSummary(
+                id=agent.id,
+                name=agent.name,
+                description=agent.description,
+                enabled=agent.enabled,
+                skill_ids=agent.skill_ids,
+                capability_hints=agent.capability_hints,
             )
-            for tool in self.accessible_tools(user)
+            for agent in self.accessible_agents(user)
         ]
 
     def skill_summaries(self, user: UserContext) -> list[SkillSummary]:
@@ -130,6 +154,8 @@ class FileRegistry:
                 name=skill.name,
                 description=skill.description,
                 enabled=skill.enabled,
+                executable=skill.executable,
+                capability_hints=skill.capability_hints,
                 resources=skill.resources,
             )
             for skill in self.accessible_skills(user)
@@ -147,6 +173,20 @@ class FileRegistry:
             raise RegistryError(f"Skill resource escapes package: {resource_path}") from exc
         if not target.is_file():
             raise RegistryError(f"Skill resource not found: {resource_path}")
+        return target.read_text(encoding="utf-8")
+
+    def read_skill_entrypoint(self, skill: SkillDefinition) -> str:
+        entrypoint = skill.entrypoint.strip().replace("\\", "/")
+        if not entrypoint or entrypoint.startswith("/") or ".." in Path(entrypoint).parts:
+            raise RegistryError(f"Invalid skill entrypoint: {skill.entrypoint}")
+        root = Path(skill.skill_dir).resolve()
+        target = (root / entrypoint).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise RegistryError(f"Skill entrypoint escapes package: {skill.entrypoint}") from exc
+        if not target.is_file():
+            raise RegistryError(f"Skill entrypoint not found: {skill.entrypoint}")
         return target.read_text(encoding="utf-8")
 
 
@@ -180,6 +220,31 @@ def normalize_optional_string(value: object) -> str | None:
     return value.strip() or None
 
 
+def normalize_bool(value: object, fallback: bool) -> bool:
+    return value if isinstance(value, bool) else fallback
+
+
+def normalize_object(value: object, fallback: dict[str, object]) -> dict[str, object]:
+    if value is None:
+        return dict(fallback)
+    if not isinstance(value, dict):
+        raise RegistryError("Expected an object")
+    return value
+
+
+def normalize_string_map(value: object) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise RegistryError("Expected a string map")
+    normalized: dict[str, str] = {}
+    for key, raw in value.items():
+        if not isinstance(key, str) or not key.strip() or not isinstance(raw, str) or not raw.strip():
+            raise RegistryError("Expected a string map")
+        normalized[key.strip()] = raw.strip()
+    return normalized
+
+
 def normalize_string_list(value: object) -> list[str]:
     if value is None:
         return []
@@ -191,7 +256,7 @@ def normalize_string_list(value: object) -> list[str]:
 
 
 def extract_permissions(metadata: dict[str, object]) -> PermissionPolicy:
-    runtime_meta = metadata.get("agent_runtime") or metadata.get("agent-runtime") or {}
+    runtime_meta = extract_runtime_metadata(metadata)
     if not isinstance(runtime_meta, dict):
         return PermissionPolicy()
     permissions = runtime_meta.get("permissions") or {}
@@ -201,11 +266,15 @@ def extract_permissions(metadata: dict[str, object]) -> PermissionPolicy:
 
 
 def normalize_enabled(metadata: dict[str, object]) -> bool:
-    runtime_meta = metadata.get("agent_runtime") or metadata.get("agent-runtime") or {}
+    runtime_meta = extract_runtime_metadata(metadata)
     if not isinstance(runtime_meta, dict):
         return True
-    enabled = runtime_meta.get("enabled")
-    return enabled if isinstance(enabled, bool) else True
+    return normalize_bool(runtime_meta.get("enabled"), True)
+
+
+def extract_runtime_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    runtime_meta = metadata.get("agent_runtime") or metadata.get("agent-runtime") or {}
+    return runtime_meta if isinstance(runtime_meta, dict) else {}
 
 
 def discover_skill_resources(skill_dir: Path) -> list[SkillResource]:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -46,6 +48,109 @@ def error_payload(exc: RequestError | Exception, status: int | None = None) -> d
         "success": False,
         "error": str(exc),
         "status": status or 500,
+    }
+
+
+def merge_execution_policy(base: Any, override: Any) -> dict[str, Any]:
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(override, dict):
+        override = {}
+
+    merged = dict(base)
+    for key, value in override.items():
+        if key not in {"packages", "env"}:
+            merged[key] = value
+
+    packages: list[str] = []
+    for source in (base.get("packages"), override.get("packages")):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if isinstance(item, str) and item.strip() and item.strip() not in packages:
+                packages.append(item.strip())
+    if packages:
+        merged["packages"] = packages
+
+    env: dict[str, str] = {}
+    for source in (base.get("env"), override.get("env")):
+        if not isinstance(source, dict):
+            continue
+        for key, value in source.items():
+            if isinstance(key, str) and isinstance(value, str):
+                env[key] = value
+    if env:
+        merged["env"] = env
+    return merged
+
+
+def resolve_required_secrets(required_secrets: Any) -> tuple[dict[str, str], list[str]]:
+    if required_secrets is None:
+        return {}, []
+    if not isinstance(required_secrets, dict):
+        raise RequestError(400, "skill.required_secrets must be an object")
+
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    for env_name, source in required_secrets.items():
+        if not isinstance(env_name, str) or not env_name.strip():
+            raise RequestError(400, "skill.required_secrets contains invalid env name")
+        if not isinstance(source, str) or not source.strip():
+            raise RequestError(400, f"skill.required_secrets.{env_name} must be a non-empty string")
+        source_name = source[4:] if source.startswith("env:") else source
+        value = os.getenv(source_name)
+        if value is None:
+            missing.append(source)
+            continue
+        resolved[env_name] = value
+    return resolved, missing
+
+
+def make_execution_id() -> str:
+    return f"exec_{uuid.uuid4().hex}"
+
+
+def build_agent_plugin_id(context: dict[str, Any], skill: dict[str, Any], execution_id: str) -> str:
+    agent_id = str(context.get("agent_id") or "default")
+    skill_name = str(skill.get("name") or "skill")
+    return f"{agent_id}_{skill_name}_{execution_id}"
+
+
+def ensure_policy_venv_key(policy: dict[str, Any], context: dict[str, Any], skill: dict[str, Any]) -> dict[str, Any]:
+    if policy.get("venv_key"):
+        return policy
+    packages = policy.get("packages") or []
+    key_payload = {
+        "agent_id": str(context.get("agent_id") or "default"),
+        "skill_name": str(skill.get("name") or "skill"),
+        "packages": sorted(item for item in packages if isinstance(item, str)),
+    }
+    digest = hashlib.sha256(json.dumps(key_payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    policy = dict(policy)
+    policy["venv_key"] = f"{key_payload['agent_id']}_{key_payload['skill_name']}_{digest}"
+    return policy
+
+def build_skill_execution_metadata(
+    *,
+    execution_id: str,
+    context: dict[str, Any],
+    skill: dict[str, Any],
+    result: dict[str, Any],
+    started_at: float,
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "execution_id": execution_id,
+        "agent_id": str(context.get("agent_id") or "default"),
+        "conversation_id": str(context.get("conversation_id") or ""),
+        "run_id": str(context.get("run_id") or ""),
+        "user_id": str(context.get("user_id") or ""),
+        "skill_name": str(skill.get("name") or ""),
+        "entrypoint": str(skill.get("entrypoint") or "skill.py"),
+        "phase": result.get("phase"),
+        "elapsed_ms": int((time.monotonic() - started_at) * 1000),
+        "timeout_ms": policy.get("timeout_ms"),
+        "packages": policy.get("packages") or [],
     }
 
 
@@ -165,7 +270,7 @@ async def run_bundle_validate(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    logger.info("Artisan Python Plugin Server starting")
+    logger.info("Agent Runtime Python Sandbox starting")
     logger.info("Runtime build: %s", settings.runtime_build)
     logger.info("Runtime dir: %s", settings.runtime_dir)
     logger.info("Venv root: %s", settings.venv_root)
@@ -308,6 +413,76 @@ async def validate_plugin(request: Request) -> JSONResponse:
     logger.info("Validate plugin request: plugin_id=%s", plugin_id)
     async with execution_slot():
         result = await run_plugin_validate(plugin_id, script, policy)
+    return json_response(result)
+
+
+@app.post("/skills/execute")
+async def execute_skill(request: Request) -> JSONResponse:
+    body = await read_json_body(request, settings)
+    if not is_record(body):
+        return json_response({"success": False, "error": "Request body must be a JSON object"}, 400)
+
+    skill = body.get("skill")
+    context = body.get("context")
+    if not is_record(skill):
+        return json_response({"success": False, "error": "skill must be an object"}, 400)
+    if not is_record(context):
+        return json_response({"success": False, "error": "context must be an object"}, 400)
+
+    script = body.get("script")
+    if not isinstance(script, str) or not script.strip():
+        return json_response({"success": False, "error": "script is required"}, 400)
+
+    arguments = body.get("arguments", {})
+    if not is_record(arguments):
+        return json_response({"success": False, "error": "arguments must be a JSON object"}, 400)
+
+    execution_id = make_execution_id()
+    started_at = time.monotonic()
+    policy = merge_execution_policy(body.get("base_policy"), skill.get("execution_policy"))
+    policy = ensure_policy_venv_key(policy, context, skill)
+    try:
+        secret_env, missing_secrets = resolve_required_secrets(skill.get("required_secrets"))
+    except RequestError as exc:
+        return json_response(exc.to_dict(), exc.status)
+    if missing_secrets:
+        return json_response(
+            {
+                "success": False,
+                "error": f"Missing required secret(s): {', '.join(missing_secrets)}",
+                "error_type": "missing_required_secrets",
+                "execution": build_skill_execution_metadata(
+                    execution_id=execution_id,
+                    context=context,
+                    skill=skill,
+                    result={},
+                    started_at=started_at,
+                    policy=policy,
+                ),
+            }
+        )
+
+    merged_env = dict(policy.get("env") or {})
+    merged_env.update(secret_env)
+    policy["env"] = merged_env
+
+    plugin_id = build_agent_plugin_id(context, skill, execution_id)
+    logger.info(
+        "Execute skill request: execution_id=%s, agent_id=%s, skill=%s",
+        execution_id,
+        context.get("agent_id"),
+        skill.get("name"),
+    )
+    async with execution_slot():
+        result = await run_plugin_execute(plugin_id, script, arguments, policy)
+    result["execution"] = build_skill_execution_metadata(
+        execution_id=execution_id,
+        context=context,
+        skill=skill,
+        result=result,
+        started_at=started_at,
+        policy=policy,
+    )
     return json_response(result)
 
 

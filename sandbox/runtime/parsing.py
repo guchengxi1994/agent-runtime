@@ -84,6 +84,20 @@ def normalize_env(value: Any) -> dict[str, str]:
     return normalized
 
 
+def normalize_venv_key(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RequestError(400, "execution_policy.venv_key must be a string")
+    value = value.strip()
+    if not value:
+        return None
+    sanitized = sanitize_plugin_id(value)
+    if len(sanitized) > 96:
+        sanitized = sanitized[:96]
+    return sanitized
+
+
 def normalize_execution_config(
     policy: Any,
     fallback_timeout: int,
@@ -105,6 +119,7 @@ def normalize_execution_config(
             pip_trusted_host=settings.default_pip_trusted_host,
             keep_venv=False,
             env={},
+            venv_key=None,
         )
     if not is_record(policy):
         raise RequestError(400, "execution_policy must be an object")
@@ -139,6 +154,7 @@ def normalize_execution_config(
         else settings.default_pip_trusted_host,
         keep_venv=normalize_bool("keep_venv", policy.get("keep_venv"), False),
         env=normalize_env(policy.get("env")),
+        venv_key=normalize_venv_key(policy.get("venv_key")),
     )
 
 

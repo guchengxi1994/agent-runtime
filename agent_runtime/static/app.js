@@ -1,9 +1,7 @@
 const state = {
   conversationId: null,
   selectedSkills: new Set(),
-  selectedTools: new Set(),
   skills: [],
-  tools: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -45,7 +43,7 @@ async function loadHealth() {
   try {
     const health = await fetchJson("/health");
     pulse.classList.remove("offline");
-    healthText.textContent = `${health.model} · ${health.skills} skills · ${health.tools} tools`;
+    healthText.textContent = `${health.model} · ${health.skills} skills · ${health.executable_skills} executable`;
   } catch (error) {
     pulse.classList.add("offline");
     healthText.textContent = `连接失败：${error.message}`;
@@ -53,14 +51,9 @@ async function loadHealth() {
 }
 
 async function loadCatalog() {
-  const [skills, tools] = await Promise.all([
-    fetchJson("/skills"),
-    fetchJson("/tools"),
-  ]);
+  const skills = await fetchJson("/skills");
   state.skills = skills.skills || [];
-  state.tools = tools.tools || [];
   renderSkills();
-  renderTools();
   await loadHealth();
 }
 
@@ -75,7 +68,8 @@ function renderSkills() {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `skill-card ${state.selectedSkills.has(skill.name) ? "selected" : ""}`;
-    button.innerHTML = `<strong>${escapeText(skill.name)}</strong><span>${escapeText(skill.description)}</span>`;
+    const badge = skill.executable ? "executable" : "harness";
+    button.innerHTML = `<strong>${escapeText(skill.name)}</strong><span>${escapeText(skill.description)}</span><small>${badge}</small>`;
     button.addEventListener("click", () => {
       if (state.selectedSkills.has(skill.name)) {
         state.selectedSkills.delete(skill.name);
@@ -83,30 +77,6 @@ function renderSkills() {
         state.selectedSkills.add(skill.name);
       }
       renderSkills();
-    });
-    list.appendChild(button);
-  }
-}
-
-function renderTools() {
-  const list = $("toolList");
-  if (!state.tools.length) {
-    list.innerHTML = '<div class="empty">暂无工具。请通过 registry/tools 或管理接口注册。</div>';
-    return;
-  }
-  list.innerHTML = "";
-  for (const tool of state.tools) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `tool-chip ${state.selectedTools.has(tool.id) ? "selected" : ""}`;
-    button.innerHTML = `<strong>${escapeText(tool.name)}</strong><span>${escapeText(tool.description)}</span>`;
-    button.addEventListener("click", () => {
-      if (state.selectedTools.has(tool.id)) {
-        state.selectedTools.delete(tool.id);
-      } else {
-        state.selectedTools.add(tool.id);
-      }
-      renderTools();
     });
     list.appendChild(button);
   }
@@ -125,7 +95,7 @@ function addMessage(role, text) {
 function renderTrace(toolCalls) {
   const traceList = $("traceList");
   if (!toolCalls || !toolCalls.length) {
-    traceList.innerHTML = '<p class="hint">本轮没有工具调用。</p>';
+    traceList.innerHTML = '<p class="hint">本轮没有 runtime 调用。</p>';
     return;
   }
   traceList.innerHTML = "";
@@ -158,9 +128,6 @@ function buildRequest(message) {
   if (state.selectedSkills.size) {
     body.skill_ids = Array.from(state.selectedSkills);
   }
-  if (state.selectedTools.size) {
-    body.tool_ids = Array.from(state.selectedTools);
-  }
   return body;
 }
 
@@ -186,7 +153,8 @@ async function sendMessage(event) {
     });
     state.conversationId = response.conversation_id;
     $("conversationId").textContent = `conversation: ${state.conversationId}`;
-    addMessage("assistant", response.message || "(empty response)");
+    const suffix = response.status === "waiting_for_user" ? "\n\n状态：等待用户补充信息。" : "";
+    addMessage("assistant", `${response.message || "(empty response)"}${suffix}`);
     renderTrace(response.tool_calls);
   } catch (error) {
     addMessage("assistant", `请求失败：${error.message}`);
@@ -203,10 +171,10 @@ function resetConversation() {
   $("messages").innerHTML = `
     <div class="message assistant">
       <div class="avatar">AR</div>
-      <div class="bubble">新会话已创建。你可以让模型自动选择 harness，也可以在左侧固定一个 harness。</div>
+      <div class="bubble">新会话已创建。你可以让模型自动选择 skill，也可以在左侧固定一个 skill。</div>
     </div>
   `;
-  $("traceList").innerHTML = '<p class="hint">工具调用、skill 激活和 runner 结果会显示在这里。</p>';
+  $("traceList").innerHTML = '<p class="hint">skill 激活、用户输入请求和 sandbox 执行结果会显示在这里。</p>';
 }
 
 function init() {
@@ -214,7 +182,7 @@ function init() {
   $("resetConversation").addEventListener("click", resetConversation);
   $("refreshCatalog").addEventListener("click", loadCatalog);
   $("clearTrace").addEventListener("click", () => {
-    $("traceList").innerHTML = '<p class="hint">工具调用、skill 激活和 runner 结果会显示在这里。</p>';
+    $("traceList").innerHTML = '<p class="hint">skill 激活、用户输入请求和 sandbox 执行结果会显示在这里。</p>';
   });
   $("messageInput").addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
