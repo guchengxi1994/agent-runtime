@@ -1,0 +1,10 @@
+{
+  "params": {
+    "child_sleep_seconds": 60,
+    "parent_sleep_seconds": 60
+  },
+  "execution_policy": {
+    "timeout_ms": 3000,
+    "idle_timeout_ms": 3000
+  }
+}

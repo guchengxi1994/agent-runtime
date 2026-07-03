@@ -1,0 +1,16 @@
+{
+  "params": {
+    "url": "https://example.com",
+    "max_paragraphs": 5,
+    "timeout_seconds": 15
+  },
+  "execution_policy": {
+    "timeout_ms": 180000,
+    "idle_timeout_ms": 45000,
+    "packages": [
+      "requests==2.32.3",
+      "beautifulsoup4==4.12.3",
+      "markdownify==0.13.1"
+    ]
+  }
+}

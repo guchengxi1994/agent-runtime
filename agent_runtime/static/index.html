@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Agent Runtime Console</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <div>
+          <p class="eyebrow">Enterprise Agent Runtime</p>
+          <h1>Harness-driven analysis console</h1>
+          <p class="hero-copy">
+            让模型先发现 skill catalog，再按需激活完整 SKILL.md harness，并基于可用工具完成分析链路。
+          </p>
+        </div>
+        <div class="health-card" id="healthCard">
+          <span class="pulse"></span>
+          <div>
+            <strong>Runtime</strong>
+            <p id="healthText">正在连接...</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="workspace">
+        <aside class="sidebar">
+          <section class="panel">
+            <div class="panel-title">
+              <span>Skill Harness</span>
+              <button class="ghost" id="refreshCatalog" type="button">刷新</button>
+            </div>
+            <p class="hint">默认让模型自行选择并调用 <code>activate_skill</code>。点选后会强制注入指定 harness。</p>
+            <div class="card-list" id="skillList"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">
+              <span>Tool Catalog</span>
+            </div>
+            <p class="hint">不点选时暴露当前用户可访问的全部工具；点选后只暴露选中工具。</p>
+            <div class="tool-list" id="toolList"></div>
+          </section>
+
+          <section class="panel compact">
+            <div class="panel-title">
+              <span>User Context</span>
+            </div>
+            <label>
+              用户 ID
+              <input id="userId" value="anonymous" />
+            </label>
+            <label>
+              租户 ID
+              <input id="tenantId" placeholder="tenant-a" />
+            </label>
+            <label>
+              Roles
+              <input id="roles" placeholder="analyst,operator" />
+            </label>
+            <label>
+              Scopes
+              <input id="scopes" placeholder="tools:run,market:read" />
+            </label>
+          </section>
+        </aside>
+
+        <section class="chat-panel">
+          <div class="chat-header">
+            <div>
+              <p class="eyebrow">Conversation</p>
+              <h2>炼钢效率分析入口</h2>
+            </div>
+            <button class="ghost" id="resetConversation" type="button">新会话</button>
+          </div>
+
+          <div class="messages" id="messages">
+            <div class="message assistant">
+              <div class="avatar">AR</div>
+              <div class="bubble">
+                输入你的分析目标，例如“分析 1 号转炉近 7 天炼钢效率，关注冶炼周期、出钢量、能耗和异常炉次”。如果后端配置了相关 harness，模型会先激活它。
+              </div>
+            </div>
+          </div>
+
+          <form class="composer" id="chatForm">
+            <textarea id="messageInput" rows="4" placeholder="输入需求：例如，帮我做炼钢效率分析，先判断需要哪些数据和工具..."></textarea>
+            <div class="composer-actions">
+              <div class="conversation-id" id="conversationId">conversation: new</div>
+              <button class="primary" id="sendButton" type="submit">发送</button>
+            </div>
+          </form>
+
+          <section class="trace-panel">
+            <div class="panel-title">
+              <span>Tool Trace</span>
+              <button class="ghost" id="clearTrace" type="button">清空</button>
+            </div>
+            <div id="traceList" class="trace-list">
+              <p class="hint">工具调用、skill 激活和 runner 结果会显示在这里。</p>
+            </div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

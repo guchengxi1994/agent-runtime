@@ -1,0 +1,16 @@
+{
+  "params": {
+    "size": 4,
+    "seed": 7,
+    "distribution": "normal",
+    "scale": 1.0,
+    "round_digits": 6
+  },
+  "execution_policy": {
+    "timeout_ms": 180000,
+    "idle_timeout_ms": 45000,
+    "packages": [
+      "numpy==2.1.3"
+    ]
+  }
+}

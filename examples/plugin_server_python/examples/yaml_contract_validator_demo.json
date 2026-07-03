@@ -1,0 +1,13 @@
+{
+  "params": {
+    "yaml_text": "name: order-worker\nowner: platform-team\nreplicas: 6\ncpu_limit: 1.5\nmemory_mb: 1024\ntags:\n  - prod\n  - queue\n  - queue\nenv:\n  LOG_LEVEL: info\n  FEATURE_X: enabled\n"
+  },
+  "execution_policy": {
+    "timeout_ms": 120000,
+    "idle_timeout_ms": 30000,
+    "packages": [
+      "PyYAML==6.0.2",
+      "pydantic==2.11.4"
+    ]
+  }
+}

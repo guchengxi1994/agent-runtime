@@ -1,0 +1,69 @@
+{
+  "params": {
+    "rows": [
+      {
+        "region": "North",
+        "category": "Hardware",
+        "product": "Laptop Pro 14",
+        "units": 12,
+        "price": 8999
+      },
+      {
+        "region": "North",
+        "category": "Hardware",
+        "product": "Laptop Air 13",
+        "units": 18,
+        "price": 6999
+      },
+      {
+        "region": "East",
+        "category": "Accessories",
+        "product": "Dock Station X",
+        "units": 35,
+        "price": 799
+      },
+      {
+        "region": "East",
+        "category": "Accessories",
+        "product": "Mechanical Keyboard",
+        "units": 28,
+        "price": 699
+      },
+      {
+        "region": "South",
+        "category": "Services",
+        "product": "Deployment Package",
+        "units": 6,
+        "price": 4800
+      },
+      {
+        "region": "South",
+        "category": "Hardware",
+        "product": "Mini Workstation",
+        "units": 9,
+        "price": 12500
+      },
+      {
+        "region": "West",
+        "category": "Services",
+        "product": "Training Session",
+        "units": 14,
+        "price": 1800
+      },
+      {
+        "region": "West",
+        "category": "Accessories",
+        "product": "USB-C Hub",
+        "units": 42,
+        "price": 299
+      }
+    ]
+  },
+  "execution_policy": {
+    "timeout_ms": 180000,
+    "idle_timeout_ms": 45000,
+    "packages": [
+      "pandas==2.2.3"
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "params": {
+    "megabytes": 768
+  },
+  "execution_policy": {
+    "timeout_ms": 60000,
+    "idle_timeout_ms": 15000
+  }
+}

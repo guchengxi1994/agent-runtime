@@ -1,0 +1,10 @@
+{
+"params": {
+    "chunk_mb": 128,
+    "sleep_ms": 20
+},
+"execution_policy": {
+    "timeout_ms": 300000,
+    "idle_timeout_ms": 300000
+}
+}

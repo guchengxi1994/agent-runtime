@@ -1,0 +1,10 @@
+{
+  "params": {
+    "line_count": 2000,
+    "line_size": 1024
+  },
+  "execution_policy": {
+    "timeout_ms": 60000,
+    "idle_timeout_ms": 10000
+  }
+}

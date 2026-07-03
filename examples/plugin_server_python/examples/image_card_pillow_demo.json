@@ -1,0 +1,15 @@
+{
+  "params": {
+    "title": "Artisan Plugin Demo",
+    "subtitle": "Pillow generated preview card",
+    "width": 960,
+    "height": 540
+  },
+  "execution_policy": {
+    "timeout_ms": 120000,
+    "idle_timeout_ms": 30000,
+    "packages": [
+      "Pillow==10.4.0"
+    ]
+  }
+}
