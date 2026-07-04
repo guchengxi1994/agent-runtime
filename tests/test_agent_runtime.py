@@ -183,6 +183,22 @@ def test_activate_skill_returns_full_harness_without_backend_parsing(tmp_path):
     assert conversation.active_skill_ids == ["demo-skill"]
 
 
+def test_system_prompt_uses_contextual_continuation_policy(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    prompt = runtime._build_system_prompt(
+        registry.get_agent("default"),
+        runtime._available_skills(ChatRequest(message="test")),
+        [],
+    )
+
+    assert "infer from the full conversation" in prompt
+    assert "Do not rely on literal keyword matching" in prompt
+    assert "avoid repeating successful tool calls" in prompt
+
+
 def test_request_user_input_pauses_and_records_tool_result(tmp_path):
     settings = make_settings(tmp_path)
     registry = FileRegistry(settings.registry_dir)
@@ -211,7 +227,7 @@ def test_request_user_input_pauses_and_records_tool_result(tmp_path):
     assert json.loads(tool_messages[-1]["content"])["status"] == "waiting_for_user"
 
 
-def test_request_user_input_fills_missing_field_guidance(tmp_path):
+def test_request_user_input_does_not_synthesize_missing_field_guidance(tmp_path):
     settings = make_settings(tmp_path)
     registry = FileRegistry(settings.registry_dir)
     registry.reload()
@@ -227,9 +243,9 @@ def test_request_user_input_fills_missing_field_guidance(tmp_path):
     response = asyncio.run(runtime.chat(ChatRequest(message="调研炼钢能耗平衡")))
 
     assert response.status == "waiting_for_user"
-    assert [field.label for field in response.requested_inputs] == ["研究主问题", "调研深度", "调研范围"]
-    assert all(field.description for field in response.requested_inputs)
-    assert "示例" in response.requested_inputs[0].description
+    assert [field.name for field in response.requested_inputs] == ["primary_question", "depth", "scope"]
+    assert [field.label for field in response.requested_inputs] == [None, None, None]
+    assert [field.description for field in response.requested_inputs] == ["", "", ""]
 
 
 def test_streaming_final_answer_emits_token_deltas(tmp_path):
