@@ -28,7 +28,7 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
-function addMessage(role, text, steps = []) {
+function addMessage(role, text, steps = [], requestedInputs = []) {
   const messages = $("messages");
   const item = document.createElement("div");
   item.className = `message ${role}`;
@@ -37,6 +37,7 @@ function addMessage(role, text, steps = []) {
     <div class="avatar">${avatar}</div>
     <div class="message-body">
       <div class="bubble">${escapeText(text)}</div>
+      ${role === "assistant" && requestedInputs.length ? renderRequestedInputs(requestedInputs) : ""}
       ${role === "assistant" && steps.length ? renderRunLog(steps) : ""}
     </div>
   `;
@@ -45,18 +46,46 @@ function addMessage(role, text, steps = []) {
   return item;
 }
 
-function updateAssistantMessage(item, text, steps = []) {
+function updateAssistantMessage(item, text, steps = [], requestedInputs = []) {
   const bubble = item.querySelector(".bubble");
   const body = item.querySelector(".message-body");
   bubble.textContent = text;
-  const existing = body.querySelector(".run-log");
-  if (existing) {
+  for (const existing of body.querySelectorAll(".requested-inputs, .run-log")) {
     existing.remove();
+  }
+  if (requestedInputs.length) {
+    body.insertAdjacentHTML("beforeend", renderRequestedInputs(requestedInputs));
   }
   if (steps.length) {
     body.insertAdjacentHTML("beforeend", renderRunLog(steps));
   }
   $("messages").scrollTop = $("messages").scrollHeight;
+}
+
+function renderRequestedInputs(inputs) {
+  const rows = inputs
+    .map((field) => {
+      const label = field.label || field.name || "补充信息";
+      const required = field.required === false ? "可选" : "必填";
+      return `
+        <div class="requested-field">
+          <div class="requested-field-head">
+            <strong>${escapeText(label)}</strong>
+            <span>${escapeText(required)}</span>
+          </div>
+          <p>${escapeText(field.description || "请补充该字段的具体要求。")}</p>
+          <small>${escapeText(field.name || "")}${field.type ? ` · ${escapeText(field.type)}` : ""}</small>
+        </div>
+      `;
+    })
+    .join("");
+
+  return `
+    <section class="requested-inputs" aria-label="需要补充的信息">
+      <div class="requested-inputs-title">需要补充</div>
+      ${rows}
+    </section>
+  `;
 }
 
 function renderRunLog(steps) {
@@ -149,10 +178,12 @@ async function sendMessage(event) {
         state.conversationId = payload.conversation_id;
         $("conversationId").textContent = `conversation: ${state.conversationId}`;
         const suffix = payload.status === "waiting_for_user" ? "\n\n状态：等待用户补充信息。" : "";
+        const requestedInputs = payload.status === "waiting_for_user" ? payload.requested_inputs || [] : [];
         updateAssistantMessage(
           assistantItem,
           `${payload.message || "(empty response)"}${suffix}`,
           payload.steps || streamedSteps,
+          requestedInputs,
         );
       },
       error(payload) {

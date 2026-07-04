@@ -211,6 +211,27 @@ def test_request_user_input_pauses_and_records_tool_result(tmp_path):
     assert json.loads(tool_messages[-1]["content"])["status"] == "waiting_for_user"
 
 
+def test_request_user_input_fills_missing_field_guidance(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.openai = FakeOpenAI(
+        tool_name="request_user_input",
+        arguments={
+            "question": "为了精准规划研究方向，请您回答以下问题。",
+            "fields": [{"name": "primary_question"}, {"name": "depth"}, {"name": "scope"}],
+        },
+    )
+
+    response = asyncio.run(runtime.chat(ChatRequest(message="调研炼钢能耗平衡")))
+
+    assert response.status == "waiting_for_user"
+    assert [field.label for field in response.requested_inputs] == ["研究主问题", "调研深度", "调研范围"]
+    assert all(field.description for field in response.requested_inputs)
+    assert "示例" in response.requested_inputs[0].description
+
+
 def test_frontend_entrypoint_serves_static_page():
     client = TestClient(app)
 

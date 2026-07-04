@@ -32,6 +32,13 @@ Skills are server-provided capability documents. Some skills are harness-only an
 If a harness skill may be relevant, call `activate_skill` to load the complete SKILL.md before applying it.
 After a skill is activated, follow its harness document. Let the harness guide whether executable skills are needed and in what order.
 If required user input is missing, call `request_user_input` instead of guessing.
+When calling `request_user_input`, make the user-facing request self-contained:
+- Ask only for information that blocks the next planning or execution step.
+- Prefer 1-3 fields; every field must have name, label, type, required, and description.
+- Field names must be snake_case, but labels must be natural user-facing Chinese.
+- Descriptions must tell the user exactly what to provide, acceptable choices or scope, and one short example.
+- Do not use vague labels such as "scope", "depth", or "constraints" without explaining what each means.
+- If reasonable defaults are safe, proceed with assumptions instead of asking.
 Only use the skills provided in this request. Do not invent skills.
 If a requested action requires unavailable data, permissions, or executable skills, say what is missing.
 Return concise, actionable answers."""
@@ -80,32 +87,60 @@ REQUEST_USER_INPUT_TOOL = {
     "type": "function",
     "function": {
         "name": "request_user_input",
-        "description": "Pause the current run and ask the user for missing information required to continue.",
+        "description": (
+            "Pause the current run and ask the user for missing information required to continue. "
+            "Use only when the missing information blocks the next planning or execution step. "
+            "Every requested field must be concrete and explain what the user should provide."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "question": {
                     "type": "string",
-                    "description": "A concise question to ask the user.",
+                    "description": (
+                        "A concise, self-contained question in the user's language. "
+                        "It must say why the input is needed and summarize the fields below."
+                    ),
                 },
                 "fields": {
                     "type": "array",
-                    "description": "Structured fields the user should provide.",
+                    "description": "One to three concrete structured fields the user should provide.",
+                    "minItems": 1,
+                    "maxItems": 3,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string"},
-                            "label": {"type": "string"},
-                            "type": {"type": "string", "enum": ["string", "number", "integer", "boolean", "object", "array"]},
-                            "required": {"type": "boolean"},
-                            "description": {"type": "string"},
+                            "name": {
+                                "type": "string",
+                                "description": "Stable snake_case field name, for example primary_question.",
+                            },
+                            "label": {
+                                "type": "string",
+                                "description": "Short user-facing Chinese label, for example 研究主问题.",
+                            },
+                            "type": {
+                                "type": "string",
+                                "enum": ["string", "number", "integer", "boolean", "object", "array"],
+                                "description": "Expected answer type.",
+                            },
+                            "required": {
+                                "type": "boolean",
+                                "description": "Whether this field is required before execution can continue.",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": (
+                                    "Specific guidance in Chinese. Include acceptable choices or boundaries "
+                                    "and one short example answer."
+                                ),
+                            },
                         },
-                        "required": ["name"],
+                        "required": ["name", "label", "type", "required", "description"],
                         "additionalProperties": False,
                     },
                 },
             },
-            "required": ["question"],
+            "required": ["question", "fields"],
             "additionalProperties": False,
         },
     },
@@ -307,7 +342,15 @@ class AgentRuntime:
                         "INPUT_REQUIRED run_id=%s question=%s fields=%s tool_call_id=%s",
                         run_id,
                         question,
-                        [field.name for field in fields],
+                        [
+                            {
+                                "name": field.name,
+                                "label": field.label,
+                                "required": field.required,
+                                "description": field.description,
+                            }
+                            for field in fields
+                        ],
                         call.id,
                     )
                     self._log_run_summary(run_id, "waiting_for_user", steps, question)
@@ -554,6 +597,7 @@ class AgentRuntime:
 
         if not isinstance(raw, list):
             return []
+        allowed_types = {"string", "number", "integer", "boolean", "object", "array"}
         fields = []
         for item in raw:
             if not isinstance(item, dict):
@@ -561,16 +605,65 @@ class AgentRuntime:
             name = str(item.get("name", "")).strip()
             if not name:
                 continue
+            field_type = str(item.get("type", "string")).strip() or "string"
+            if field_type not in allowed_types:
+                field_type = "string"
+            label = str(item.get("label", "")).strip() or AgentRuntime._humanize_input_label(name)
+            description = str(item.get("description", "")).strip()
+            if len(description) < 8:
+                description = AgentRuntime._fallback_input_description(name, label)
             fields.append(
                 RequestedInputField(
                     name=name,
-                    label=str(item.get("label", "")).strip() or None,
-                    type=str(item.get("type", "string")).strip() or "string",
+                    label=label,
+                    type=field_type,
                     required=item.get("required") if isinstance(item.get("required"), bool) else True,
-                    description=str(item.get("description", "")).strip(),
+                    description=description,
                 )
             )
         return fields
+
+    @staticmethod
+    def _humanize_input_label(name: str) -> str:
+        normalized = name.strip().lower().replace("-", "_")
+        label_map = {
+            "primary_question": "研究主问题",
+            "research_question": "研究主问题",
+            "question": "核心问题",
+            "depth": "调研深度",
+            "depth_level": "调研深度",
+            "scope": "调研范围",
+            "scope_constraints": "范围约束",
+            "constraints": "限制条件",
+            "time_range": "时间范围",
+            "region": "地域范围",
+            "industry": "行业范围",
+            "output_format": "输出形式",
+            "audience": "使用对象",
+        }
+        if normalized in label_map:
+            return label_map[normalized]
+        return normalized.replace("_", " ").strip().title() or "补充信息"
+
+    @staticmethod
+    def _fallback_input_description(name: str, label: str) -> str:
+        normalized = name.strip().lower().replace("-", "_")
+        description_map = {
+            "primary_question": "请说明这次任务最想回答的核心问题。示例：炼钢工序的能耗平衡如何建模并识别主要节能点？",
+            "research_question": "请说明这次任务最想回答的核心问题。示例：炼钢工序的能耗平衡如何建模并识别主要节能点？",
+            "question": "请补充需要优先回答的问题。示例：比较转炉与电炉炼钢的能耗边界和关键影响因素。",
+            "depth": "请选择期望深度。示例：快速综述、工程可执行方案、学术级深度调研。",
+            "depth_level": "请选择期望深度。示例：快速综述、工程可执行方案、学术级深度调研。",
+            "scope": "请说明调研边界，包括行业、地区、时间范围或要排除的内容。示例：中国钢铁行业，2020年以来，聚焦炼钢不含轧钢。",
+            "scope_constraints": "请说明调研边界和限制条件，包括行业、地区、时间范围或要排除的内容。示例：中国钢铁行业，2020年以来，聚焦炼钢不含轧钢。",
+            "constraints": "请说明必须遵守的限制条件。示例：只使用公开来源，优先中文资料，需要可追溯引用。",
+            "time_range": "请说明关注的时间范围。示例：2020年至今，或最近三年。",
+            "region": "请说明关注的国家、地区或市场。示例：中国、欧盟、全球对比。",
+            "industry": "请说明关注的行业或业务场景。示例：长流程钢厂炼钢工序。",
+            "output_format": "请说明希望的输出形式。示例：结构化报告、表格对比、执行清单。",
+            "audience": "请说明报告给谁使用。示例：工程技术团队、管理层、论文写作。",
+        }
+        return description_map.get(normalized, f"请补充“{label}”的具体要求，并给出一个示例或边界。")
 
     @staticmethod
     def _build_pending_input_prompt(pending_input_request: dict[str, Any]) -> str:
