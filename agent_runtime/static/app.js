@@ -1,17 +1,8 @@
 const state = {
   conversationId: null,
-  selectedSkills: new Set(),
-  skills: [],
 };
 
 const $ = (id) => document.getElementById(id);
-
-function splitCsv(value) {
-  return value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
 
 function escapeText(value) {
   const div = document.createElement("div");
@@ -37,122 +28,73 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
-async function loadHealth() {
-  const healthText = $("healthText");
-  const pulse = document.querySelector(".pulse");
-  try {
-    const health = await fetchJson("/health");
-    pulse.classList.remove("offline");
-    const baseUrl = health.openai_base_url ? ` · ${health.openai_base_url}` : "";
-    healthText.textContent = `${health.model}${baseUrl} · ${health.skills} skills · ${health.executable_skills} executable`;
-  } catch (error) {
-    pulse.classList.add("offline");
-    healthText.textContent = `连接失败：${error.message}`;
-  }
-}
-
-async function loadCatalog() {
-  const skills = await fetchJson("/skills");
-  state.skills = skills.skills || [];
-  renderSkills();
-  await loadHealth();
-}
-
-function renderSkills() {
-  const list = $("skillList");
-  if (!state.skills.length) {
-    list.innerHTML = '<div class="empty">暂无 skill harness。请在 registry/skills 下添加 SKILL.md。</div>';
-    return;
-  }
-  list.innerHTML = "";
-  for (const skill of state.skills) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `skill-card ${state.selectedSkills.has(skill.name) ? "selected" : ""}`;
-    const badge = skill.executable ? "executable" : "harness";
-    button.innerHTML = `<strong>${escapeText(skill.name)}</strong><span>${escapeText(skill.description)}</span><small>${badge}</small>`;
-    button.addEventListener("click", () => {
-      if (state.selectedSkills.has(skill.name)) {
-        state.selectedSkills.delete(skill.name);
-      } else {
-        state.selectedSkills.add(skill.name);
-      }
-      renderSkills();
-    });
-    list.appendChild(button);
-  }
-}
-
-function addMessage(role, text) {
+function addMessage(role, text, steps = []) {
   const messages = $("messages");
   const item = document.createElement("div");
   item.className = `message ${role}`;
   const avatar = role === "user" ? "U" : "AR";
-  item.innerHTML = `<div class="avatar">${avatar}</div><div class="bubble">${escapeText(text)}</div>`;
+  item.innerHTML = `
+    <div class="avatar">${avatar}</div>
+    <div class="message-body">
+      <div class="bubble">${escapeText(text)}</div>
+      ${role === "assistant" && steps.length ? renderRunLog(steps) : ""}
+    </div>
+  `;
   messages.appendChild(item);
   messages.scrollTop = messages.scrollHeight;
 }
 
-function renderTrace(steps, toolCalls) {
-  const traceList = $("traceList");
-  if (steps && steps.length) {
-    traceList.innerHTML = "";
-    for (const step of steps) {
-      const item = document.createElement("details");
-      item.className = `trace-item step-${escapeText(step.kind || "unknown")}`;
-      item.open = step.kind === "waiting_for_user" || step.kind === "sandbox_execution";
-      item.innerHTML = `
-        <summary>
-          <span class="step-kind">${escapeText(step.kind || "unknown")}</span>
-          <strong>${escapeText(step.label || "")}</strong>
-          <span>${escapeText(step.status || "")}</span>
-        </summary>
-        <p class="trace-detail">${escapeText(step.detail || "")}</p>
-        <pre>${escapeText(JSON.stringify({
-          step_id: step.step_id,
-          metadata: step.metadata,
-          tool_call_id: step.tool_call_id,
-          execution_id: step.execution_id,
-          created_at: step.created_at,
-        }, null, 2))}</pre>
+function renderRunLog(steps) {
+  const toolSteps = steps.filter((step) => step.kind === "sandbox_execution");
+  const waitingStep = steps.find((step) => step.kind === "waiting_for_user");
+  const statusText = waitingStep
+    ? "等待用户输入"
+    : toolSteps.length
+      ? `使用工具 ${toolSteps.map((step) => step.label).join(", ")}`
+      : "未执行 sandbox 工具";
+  const summaryClass = toolSteps.length ? "used-tool" : waitingStep ? "waiting" : "no-tool";
+  const rows = steps
+    .map((step) => {
+      const payload = {
+        step_id: step.step_id,
+        kind: step.kind,
+        label: step.label,
+        status: step.status,
+        detail: step.detail,
+        metadata: step.metadata,
+        tool_call_id: step.tool_call_id,
+        execution_id: step.execution_id,
+        created_at: step.created_at,
+      };
+      return `
+        <div class="run-step step-${escapeText(step.kind || "unknown")}">
+          <div class="run-step-line">
+            <span class="step-kind">${escapeText(step.kind || "unknown")}</span>
+            <strong>${escapeText(step.label || "")}</strong>
+            <small>${escapeText(step.status || "")}</small>
+          </div>
+          ${step.detail ? `<p>${escapeText(step.detail)}</p>` : ""}
+          <pre>${escapeText(JSON.stringify(payload, null, 2))}</pre>
+        </div>
       `;
-      traceList.appendChild(item);
-    }
-    return;
-  }
-  if (!toolCalls || !toolCalls.length) {
-    traceList.innerHTML = '<p class="hint">本轮没有 runtime 调用。</p>';
-    return;
-  }
-  traceList.innerHTML = "";
-  for (const call of toolCalls) {
-    const item = document.createElement("details");
-    item.className = "trace-item";
-    item.open = call.tool_name === "activate_skill";
-    item.innerHTML = `
-      <summary><strong>${escapeText(call.tool_name)}</strong> · ${escapeText(call.tool_call_id)}</summary>
-      <pre>${escapeText(JSON.stringify({ arguments: call.arguments, result: call.result }, null, 2))}</pre>
-    `;
-    traceList.appendChild(item);
-  }
+    })
+    .join("");
+
+  return `
+    <details class="run-log ${summaryClass}">
+      <summary>
+        <span>运行日志</span>
+        <strong>${escapeText(statusText)}</strong>
+      </summary>
+      <div class="run-log-body">${rows}</div>
+    </details>
+  `;
 }
 
 function buildRequest(message) {
-  const user = {
-    id: $("userId").value.trim() || "anonymous",
-    tenant_id: $("tenantId").value.trim() || null,
-    roles: splitCsv($("roles").value),
-    scopes: splitCsv($("scopes").value),
-  };
-  const body = {
-    message,
-    user,
-  };
+  const body = { message };
   if (state.conversationId) {
     body.conversation_id = state.conversationId;
-  }
-  if (state.selectedSkills.size) {
-    body.skill_ids = Array.from(state.selectedSkills);
   }
   return body;
 }
@@ -180,8 +122,7 @@ async function sendMessage(event) {
     state.conversationId = response.conversation_id;
     $("conversationId").textContent = `conversation: ${state.conversationId}`;
     const suffix = response.status === "waiting_for_user" ? "\n\n状态：等待用户补充信息。" : "";
-    addMessage("assistant", `${response.message || "(empty response)"}${suffix}`);
-    renderTrace(response.steps, response.tool_calls);
+    addMessage("assistant", `${response.message || "(empty response)"}${suffix}`, response.steps || []);
   } catch (error) {
     addMessage("assistant", `请求失败：${error.message}`);
   } finally {
@@ -197,28 +138,22 @@ function resetConversation() {
   $("messages").innerHTML = `
     <div class="message assistant">
       <div class="avatar">AR</div>
-      <div class="bubble">新会话已创建。你可以让模型自动选择 skill，也可以在左侧固定一个 skill。</div>
+      <div class="message-body">
+        <div class="bubble">新会话已创建。输入任务后，运行日志会折叠在回复下方。</div>
+      </div>
     </div>
   `;
-  $("traceList").innerHTML = '<p class="hint">skill 激活、用户输入请求和 sandbox 执行结果会显示在这里。</p>';
 }
 
 function init() {
   $("chatForm").addEventListener("submit", sendMessage);
   $("resetConversation").addEventListener("click", resetConversation);
-  $("refreshCatalog").addEventListener("click", loadCatalog);
-  $("clearTrace").addEventListener("click", () => {
-    $("traceList").innerHTML = '<p class="hint">skill 激活、用户输入请求和 sandbox 执行结果会显示在这里。</p>';
-  });
   $("messageInput").addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       $("chatForm").requestSubmit();
     }
   });
-  loadCatalog().catch((error) => {
-    $("skillList").innerHTML = `<div class="empty">加载 catalog 失败：${escapeText(error.message)}</div>`;
-  });
+  $("messageInput").focus();
 }
 
 init();
-

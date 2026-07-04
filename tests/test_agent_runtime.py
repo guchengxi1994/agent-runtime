@@ -214,7 +214,7 @@ def test_frontend_entrypoint_serves_static_page():
     response = client.get("/")
 
     assert response.status_code == 200
-    assert "Harness-driven analysis console" in response.text
+    assert "对话入口" in response.text
 
 
 class FakeOpenAI:

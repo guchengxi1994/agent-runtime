@@ -15,6 +15,9 @@ class LoguruCompatLogger:
     def info(self, message: str, *args: object, **kwargs: object) -> None:
         self._logger.info(self._format(message, args), **kwargs)
 
+    def debug(self, message: str, *args: object, **kwargs: object) -> None:
+        self._logger.debug(self._format(message, args), **kwargs)
+
     def warning(self, message: str, *args: object, **kwargs: object) -> None:
         self._logger.warning(self._format(message, args), **kwargs)
 
@@ -45,6 +48,7 @@ class InterceptHandler(logging.Handler):
 
 def setup_logging() -> None:
     level_name = os.getenv("AGENT_RUNTIME_LOG_LEVEL", "INFO").upper()
+    http_level_name = os.getenv("AGENT_RUNTIME_HTTP_LOG_LEVEL", "WARNING").upper()
     _logger.remove()
     _logger.add(
         sys.stdout,
@@ -62,6 +66,8 @@ def setup_logging() -> None:
         level=getattr(logging, level_name, logging.INFO),
         force=False,
     )
+    logging.getLogger("httpx").setLevel(getattr(logging, http_level_name, logging.WARNING))
+    logging.getLogger("httpcore").setLevel(getattr(logging, http_level_name, logging.WARNING))
 
 
 logger = LoguruCompatLogger("agent_runtime")

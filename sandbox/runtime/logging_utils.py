@@ -15,6 +15,9 @@ class LoguruCompatLogger:
     def info(self, message: str, *args: object, **kwargs: object) -> None:
         self._logger.info(self._format(message, args), **kwargs)
 
+    def debug(self, message: str, *args: object, **kwargs: object) -> None:
+        self._logger.debug(self._format(message, args), **kwargs)
+
     def warning(self, message: str, *args: object, **kwargs: object) -> None:
         self._logger.warning(self._format(message, args), **kwargs)
 

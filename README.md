@@ -149,7 +149,13 @@ metadata:
 - `waiting_for_user`: 通过 `request_user_input` 暂停，等待用户补充字段。
 - `final`: 生成最终回复或 runtime 达到轮次上限。
 
-控制台会输出同源日志：`runtime_step step_id=... kind=... label=... status=...`，用于调试模型规划、sandbox 执行和用户输入暂停之间的边界。
+控制台默认输出高信号日志：
+
+- `TOOL_USED run_id=... tool=calculator ...`: 已执行 sandbox 工具。
+- `RUN_DONE run_id=... used_tool=true tools=['calculator'] ...`: 本轮是否用了工具的总结。
+- `INPUT_REQUIRED run_id=...`: runtime 暂停等待用户输入。
+
+完整 step 明细会降到 DEBUG：设置 `AGENT_RUNTIME_LOG_LEVEL=DEBUG` 后可以看到 `runtime_step step_id=... kind=...`。
 
 ## API
 
@@ -179,6 +185,7 @@ metadata:
 | `AGENT_RUNTIME_MAX_RUNTIME_ROUNDS` | `6` | 单轮对话最大 runtime 调用轮次 |
 | `AGENT_RUNTIME_REQUEST_TIMEOUT_SECONDS` | `600` | 调用 sandbox 的 HTTP 超时 |
 | `AGENT_RUNTIME_LOG_LEVEL` | `INFO` | runtime 控制台日志等级 |
+| `AGENT_RUNTIME_HTTP_LOG_LEVEL` | `WARNING` | `httpx/httpcore` 请求日志等级 |
 
 启动时 runtime 会输出一条 OpenAI client 配置日志，包含 `model`、`base_url`、`base_url_source`、`api_key_present`、`api_key_source`、脱敏后的 `api_key_masked`、key 长度、`api_key_sha256` 短指纹和 `env_file`。不会输出完整 API key。
 

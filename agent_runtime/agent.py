@@ -224,6 +224,7 @@ class AgentRuntime:
                     detail="Model returned a final assistant message.",
                     metadata={"run_id": run_id, "content_length": len(content)},
                 )
+                self._log_run_summary(run_id, "completed", steps, content)
                 return ChatResponse(
                     conversation_id=conversation.id,
                     agent_id=agent.id,
@@ -294,6 +295,14 @@ class AgentRuntime:
                     conversation.messages.append(tool_message)
                     conversation.messages.append(assistant_question)
                     conversation.updated_at = datetime.now(timezone.utc)
+                    logger.info(
+                        "INPUT_REQUIRED run_id=%s question=%s fields=%s tool_call_id=%s",
+                        run_id,
+                        question,
+                        [field.name for field in fields],
+                        call.id,
+                    )
+                    self._log_run_summary(run_id, "waiting_for_user", steps, question)
                     return ChatResponse(
                         conversation_id=conversation.id,
                         agent_id=agent.id,
@@ -367,6 +376,7 @@ class AgentRuntime:
             detail=final_message,
             metadata={"run_id": run_id, "max_runtime_rounds": self.settings.max_runtime_rounds},
         )
+        self._log_run_summary(run_id, "failed", steps, final_message)
         return ChatResponse(
             conversation_id=conversation.id,
             agent_id=agent.id,
@@ -590,6 +600,17 @@ class AgentRuntime:
             tool_call_id=tool_call_id,
             execution_id=execution_id,
         )
+        if kind == "sandbox_execution":
+            logger.info(
+                "TOOL_USED run_id=%s tool=%s status=%s success=%s execution_id=%s tool_call_id=%s detail=%s",
+                run_id,
+                label,
+                "completed" if success is not False else "failed",
+                success,
+                execution_id,
+                tool_call_id,
+                str(result.get("error") or result.get("phase") or ""),
+            )
 
     def _record_step(
         self,
@@ -614,7 +635,7 @@ class AgentRuntime:
             execution_id=execution_id,
         )
         steps.append(step)
-        logger.info(
+        logger.debug(
             "runtime_step step_id=%s kind=%s label=%s status=%s tool_call_id=%s execution_id=%s detail=%s metadata=%s",
             step.step_id,
             step.kind,
@@ -626,6 +647,26 @@ class AgentRuntime:
             json.dumps(step.metadata, ensure_ascii=False, default=str),
         )
         return step
+
+    @staticmethod
+    def _log_run_summary(
+        run_id: str,
+        status: str,
+        steps: list[RuntimeStepTrace],
+        final_message: str,
+    ) -> None:
+        tool_names = [step.label for step in steps if step.kind == "sandbox_execution"]
+        runtime_calls = [step.label for step in steps if step.kind in {"runtime_call", "waiting_for_user"}]
+        logger.info(
+            "RUN_DONE run_id=%s status=%s used_tool=%s tools=%s sandbox_calls=%s runtime_calls=%s final_chars=%s",
+            run_id,
+            status,
+            bool(tool_names),
+            tool_names or [],
+            len(tool_names),
+            runtime_calls or [],
+            len(final_message or ""),
+        )
 
     def _thinking_detail(self, reasoning_text: str | None) -> str:
         if reasoning_text and self.settings.expose_reasoning_content:

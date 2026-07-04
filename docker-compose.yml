@@ -11,6 +11,7 @@ services:
     ports:
       - "8010:8010"
     volumes:
+      - ./agent_runtime:/app/agent_runtime
       - ./registry:/app/registry
     depends_on:
       - sandbox
