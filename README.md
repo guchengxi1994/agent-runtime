@@ -109,6 +109,15 @@ Use this executable skill for deterministic arithmetic. Do not invent missing nu
 
 `skill.py` 必须定义 `definition` 和 `execute(params)`。依赖包写在 `execution_policy.packages`；API token/header 等 secret 只声明在 `required_secrets`，由 sandbox 从自身环境变量解析并注入进程环境。
 
+## Research Skills
+
+仓库包含 `academic-deep-research` harness skill，以及两个研究原子能力：
+
+- `web-search`: 通过 `TAVILY_API_KEY`、`SERPER_API_KEY` 或 `BING_SEARCH_API_KEY` 中任意一个搜索 provider 做 source discovery。
+- `web-fetch`: 抓取指定 URL 并提取正文、metadata 和链接。
+
+如果未配置搜索 provider，`web-search` 会返回 `missing_search_provider`，模型应要求用户或 operator 配置 `.env` 后再继续研究。
+
 ## Harness Skill
 
 Harness skill 不需要 `executable=true`，只提供规划说明：

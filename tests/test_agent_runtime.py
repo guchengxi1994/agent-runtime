@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 from agent_runtime.agent import AgentRuntime
 from agent_runtime.app import app
@@ -10,6 +11,8 @@ from agent_runtime.models import ChatRequest, PermissionPolicy, SkillSummary, Us
 from agent_runtime.permissions import is_allowed
 from agent_runtime.registry import FileRegistry
 from fastapi.testclient import TestClient
+from sandbox.runtime.models import ExecutionConfig
+from sandbox.runtime.process import cached_dependencies_match, write_dependency_marker
 
 
 def write_skill(
@@ -215,6 +218,49 @@ def test_frontend_entrypoint_serves_static_page():
 
     assert response.status_code == 200
     assert "对话入口" in response.text
+
+
+def test_builtin_research_skills_are_registered():
+    registry = FileRegistry(Path("registry").resolve())
+    registry.reload()
+
+    assert "academic-deep-research" in registry.skills
+    assert registry.skills["academic-deep-research"].executable is False
+    assert registry.skills["web-search"].executable is True
+    assert registry.skills["web-search"].execution_policy["packages"] == ["requests==2.32.3"]
+    assert registry.skills["web-fetch"].executable is True
+    assert registry.skills["web-fetch"].execution_policy["packages"] == [
+        "requests==2.32.3",
+        "beautifulsoup4==4.12.3",
+    ]
+
+
+def make_execution_config(packages: list[str]) -> ExecutionConfig:
+    return ExecutionConfig(
+        timeout_ms=60000,
+        idle_timeout_ms=20000,
+        packages=packages,
+        pip_index_url="https://pypi.example/simple",
+        pip_extra_index_url=None,
+        pip_trusted_host="pypi.example",
+        keep_venv=False,
+        env={},
+        venv_key="test_venv",
+    )
+
+
+def test_cached_venv_requires_matching_dependency_marker(tmp_path):
+    venv_dir = tmp_path / "venv"
+    venv_dir.mkdir()
+    config = make_execution_config(["requests==2.32.3"])
+
+    assert cached_dependencies_match(venv_dir, config) is False
+
+    write_dependency_marker(venv_dir, config)
+
+    assert cached_dependencies_match(venv_dir, config) is True
+    assert cached_dependencies_match(venv_dir, make_execution_config(["requests==2.32.2"])) is False
+    assert cached_dependencies_match(venv_dir, make_execution_config([])) is True
 
 
 class FakeOpenAI:

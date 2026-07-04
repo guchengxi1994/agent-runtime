@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import inspect
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from openai import AsyncOpenAI
 
@@ -115,6 +116,9 @@ class AgentRequestError(ValueError):
     pass
 
 
+StepCallback = Callable[[RuntimeStepTrace], Awaitable[None] | None]
+
+
 class AgentRuntime:
     def __init__(self, settings: AgentRuntimeSettings, registry: FileRegistry) -> None:
         self.settings = settings
@@ -141,7 +145,7 @@ class AgentRuntime:
         self.conversations: dict[str, ConversationState] = {}
         self.executions: list[dict[str, Any]] = []
 
-    async def chat(self, request: ChatRequest) -> ChatResponse:
+    async def chat(self, request: ChatRequest, on_step: StepCallback | None = None) -> ChatResponse:
         agent = self._resolve_agent(request)
         conversation = self._get_or_create_conversation(request, agent)
         run_id = f"run_{uuid.uuid4().hex}"
@@ -177,6 +181,7 @@ class AgentRuntime:
                 openai_kwargs["tool_choice"] = "auto"
             self._record_step(
                 steps,
+                on_step,
                 kind="thinking",
                 label="model_planning",
                 status="started",
@@ -201,6 +206,7 @@ class AgentRuntime:
             tool_calls = choice.message.tool_calls or []
             self._record_step(
                 steps,
+                on_step,
                 kind="thinking",
                 label="model_planning",
                 status="completed",
@@ -218,6 +224,7 @@ class AgentRuntime:
                 conversation.updated_at = datetime.now(timezone.utc)
                 self._record_step(
                     steps,
+                    on_step,
                     kind="final",
                     label="assistant_response",
                     status="completed",
@@ -244,10 +251,10 @@ class AgentRuntime:
                         "role": "system",
                         "content": self._build_system_prompt(agent, available_skills, activated_skills),
                     }
-                    self._record_call_step(steps, run_id, "runtime_call", tool_name, call.id, result)
+                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, call.id, result)
                 elif tool_name == "read_skill_resource":
                     result = self._read_skill_resource(args, activated_skills)
-                    self._record_call_step(steps, run_id, "runtime_call", tool_name, call.id, result)
+                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, call.id, result)
                 elif tool_name == "request_user_input":
                     question = str(args.get("question", "")).strip() or "请补充继续执行所需的信息。"
                     fields = self._parse_requested_fields(args.get("fields"))
@@ -265,6 +272,7 @@ class AgentRuntime:
                     }
                     self._record_step(
                         steps,
+                        on_step,
                         kind="waiting_for_user",
                         label="request_user_input",
                         status="waiting",
@@ -317,10 +325,10 @@ class AgentRuntime:
                     skill = skill_by_name.get(tool_name)
                     if skill is None:
                         result = {"success": False, "error": f"Executable skill is not available: {tool_name}"}
-                        self._record_call_step(steps, run_id, "runtime_call", tool_name, call.id, result)
+                        self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, call.id, result)
                     elif not is_allowed(skill.permissions, request.user):
                         result = {"success": False, "error": f"Permission denied for skill: {tool_name}"}
-                        self._record_call_step(steps, run_id, "runtime_call", tool_name, call.id, result)
+                        self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, call.id, result)
                     else:
                         script = self.registry.read_skill_entrypoint(skill)
                         result = await self.runner.execute_skill(
@@ -341,6 +349,7 @@ class AgentRuntime:
                             self.executions.append(execution)
                         self._record_call_step(
                             steps,
+                            on_step,
                             run_id,
                             "sandbox_execution",
                             tool_name,
@@ -370,6 +379,7 @@ class AgentRuntime:
         conversation.updated_at = datetime.now(timezone.utc)
         self._record_step(
             steps,
+            on_step,
             kind="final",
             label="runtime_round_limit",
             status="failed",
@@ -577,6 +587,7 @@ class AgentRuntime:
     def _record_call_step(
         self,
         steps: list[RuntimeStepTrace],
+        on_step: StepCallback | None,
         run_id: str,
         kind: str,
         label: str,
@@ -588,6 +599,7 @@ class AgentRuntime:
         success = result.get("success") if isinstance(result, dict) else None
         self._record_step(
             steps,
+            on_step,
             kind=kind,
             label=label,
             status="completed" if success is not False else "failed",
@@ -615,6 +627,7 @@ class AgentRuntime:
     def _record_step(
         self,
         steps: list[RuntimeStepTrace],
+        on_step: StepCallback | None,
         *,
         kind: str,
         label: str,
@@ -635,6 +648,7 @@ class AgentRuntime:
             execution_id=execution_id,
         )
         steps.append(step)
+        self._emit_step(on_step, step)
         logger.debug(
             "runtime_step step_id=%s kind=%s label=%s status=%s tool_call_id=%s execution_id=%s detail=%s metadata=%s",
             step.step_id,
@@ -647,6 +661,14 @@ class AgentRuntime:
             json.dumps(step.metadata, ensure_ascii=False, default=str),
         )
         return step
+
+    @staticmethod
+    def _emit_step(on_step: StepCallback | None, step: RuntimeStepTrace) -> None:
+        if on_step is None:
+            return
+        result = on_step(step)
+        if inspect.isawaitable(result):
+            raise RuntimeError("Async step callbacks must be awaited through chat_stream")
 
     @staticmethod
     def _log_run_summary(

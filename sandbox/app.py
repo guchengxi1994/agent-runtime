@@ -468,10 +468,12 @@ async def execute_skill(request: Request) -> JSONResponse:
 
     plugin_id = build_agent_plugin_id(context, skill, execution_id)
     logger.info(
-        "Execute skill request: execution_id=%s, agent_id=%s, skill=%s",
+        "Execute skill request: execution_id=%s, agent_id=%s, skill=%s, packages=%s, venv_key=%s",
         execution_id,
         context.get("agent_id"),
         skill.get("name"),
+        policy.get("packages") or [],
+        policy.get("venv_key"),
     )
     async with execution_slot():
         result = await run_plugin_execute(plugin_id, script, arguments, policy)

@@ -328,6 +328,9 @@ PHASE_POST_EXECUTE = "post-execute"
 
 COMPILE_ACTIVITY_GRACE_MS = 30000
 LOG_PREVIEW_LIMIT = 400
+DEPENDENCY_MARKER_FILENAME = ".agent_runtime_dependencies.json"
+
+_venv_locks: dict[str, asyncio.Lock] = {}
 
 
 def phase_elapsed_ms(phase_ctx: PhaseContext) -> int:
@@ -358,6 +361,64 @@ def build_recent_output_excerpt(stdout: str, stderr: str, limit: int = LOG_PREVI
 
 def build_recent_output_excerpt_from_progress(progress: ProcessProgress) -> str:
     return progress.last_output_preview
+
+
+def get_venv_lock(venv_dir: Path) -> asyncio.Lock:
+    lock_key = str(venv_dir)
+    lock = _venv_locks.get(lock_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _venv_locks[lock_key] = lock
+    return lock
+
+
+def canonical_packages(packages: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for package in packages:
+        package = package.strip()
+        if package and package not in normalized:
+            normalized.append(package)
+    return sorted(normalized)
+
+
+def build_dependency_marker(config: ExecutionConfig) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "python": f"{sys.version_info.major}.{sys.version_info.minor}",
+        "packages": canonical_packages(config.packages),
+        "pip_index_url": config.pip_index_url,
+        "pip_extra_index_url": config.pip_extra_index_url,
+        "pip_trusted_host": config.pip_trusted_host,
+    }
+
+
+def dependency_marker_path(venv_dir: Path) -> Path:
+    return venv_dir / DEPENDENCY_MARKER_FILENAME
+
+
+def read_dependency_marker(venv_dir: Path) -> dict[str, Any] | None:
+    marker_path = dependency_marker_path(venv_dir)
+    if not marker_path.is_file():
+        return None
+    try:
+        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return marker if isinstance(marker, dict) else None
+
+
+def cached_dependencies_match(venv_dir: Path, config: ExecutionConfig) -> bool:
+    if not config.packages:
+        return True
+    return read_dependency_marker(venv_dir) == build_dependency_marker(config)
+
+
+def write_dependency_marker(venv_dir: Path, config: ExecutionConfig) -> None:
+    marker_path = dependency_marker_path(venv_dir)
+    marker_path.write_text(
+        json.dumps(build_dependency_marker(config), ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 def detect_oom_hint(returncode: int, stderr: str, stdout: str) -> str | None:
@@ -811,7 +872,31 @@ async def ensure_venv(
     stdout_queue: asyncio.Queue[dict[str, Any]] | None = None,
 ) -> Path:
     venv_dir = settings.venv_root / config.venv_key if config.venv_key else workspace.venv_dir
-    if config.venv_key and get_venv_python(venv_dir).is_file():
+    if config.venv_key:
+        async with get_venv_lock(venv_dir):
+            return await ensure_venv_unlocked(
+                workspace,
+                config,
+                budget,
+                settings,
+                plugin_id,
+                stdout_queue,
+                venv_dir,
+            )
+    return await ensure_venv_unlocked(workspace, config, budget, settings, plugin_id, stdout_queue, venv_dir)
+
+
+async def ensure_venv_unlocked(
+    workspace: TaskWorkspace,
+    config: ExecutionConfig,
+    budget: ExecutionBudget,
+    settings: RuntimeSettings,
+    plugin_id: str,
+    stdout_queue: asyncio.Queue[dict[str, Any]] | None,
+    venv_dir: Path,
+) -> Path:
+    venv_python = get_venv_python(venv_dir)
+    if config.venv_key and venv_python.is_file() and cached_dependencies_match(venv_dir, config):
         await emit_runtime_event(
             stdout_queue,
             event="venv",
@@ -826,46 +911,70 @@ async def ensure_venv(
         logger.info("[%s] Reusing cached venv: key=%s, venv_dir=%s", plugin_id, config.venv_key, venv_dir)
         return venv_dir
 
-    pre_phase = await emit_phase_event(
-        stdout_queue,
-        plugin_id,
-        PHASE_PRE_EXECUTE,
-        "in_progress",
-        step="create_venv",
-        workspace=str(workspace.root),
-        venv_dir=str(venv_dir),
-        venv_key=config.venv_key,
-    )
-    logger.info("[%s] Creating venv: workspace=%s, venv_dir=%s", plugin_id, workspace.root, venv_dir)
-    create_command = [sys.executable, "-m", "venv", "--without-pip", str(venv_dir)]
-    create_result = await run_subprocess(
-        create_command,
-        settings=settings,
-        phase_ctx=pre_phase,
-        cwd=workspace.root,
-        timeout_ms=remaining_timeout_ms(budget, settings, phase_ctx=pre_phase),
-        idle_timeout_ms=config.idle_timeout_ms,
-        stdout_queue=stdout_queue,
-        stream_name="venv",
-    )
-    if create_result.returncode != 0:
-        raise_failed_subprocess_error(
-            phase_ctx=pre_phase,
-            step="create_venv",
-            result=create_result,
-            message=f"Failed to create venv: {create_result.stderr.strip() or 'unknown error'}",
-            code="venv_create_failed",
+    if config.venv_key and venv_python.is_file():
+        await emit_runtime_event(
+            stdout_queue,
+            event="venv",
+            data={
+                "plugin_id": plugin_id,
+                "phase": PHASE_PRE_EXECUTE,
+                "line": f"Cached venv dependency marker is missing or stale; syncing packages: {config.venv_key}",
+                "venv_key": config.venv_key,
+                "venv_dir": str(venv_dir),
+                "packages": config.packages,
+            },
         )
-    await complete_phase_event(
-        stdout_queue,
-        pre_phase,
-        step="create_venv",
-        venv_dir=str(venv_dir),
-    )
-    logger.info("[%s] Venv created: venv_dir=%s", plugin_id, venv_dir)
+        logger.info(
+            "[%s] Cached venv dependency marker is missing or stale; syncing packages: key=%s, venv_dir=%s, packages=%s",
+            plugin_id,
+            config.venv_key,
+            venv_dir,
+            config.packages,
+        )
+    else:
+        if config.venv_key and venv_dir.exists():
+            logger.warning("[%s] Removing incomplete cached venv before recreate: venv_dir=%s", plugin_id, venv_dir)
+            await asyncio.to_thread(shutil.rmtree, venv_dir, True)
 
-    venv_python = get_venv_python(venv_dir)
-    if config.packages:
+        pre_phase = await emit_phase_event(
+            stdout_queue,
+            plugin_id,
+            PHASE_PRE_EXECUTE,
+            "in_progress",
+            step="create_venv",
+            workspace=str(workspace.root),
+            venv_dir=str(venv_dir),
+            venv_key=config.venv_key,
+        )
+        logger.info("[%s] Creating venv: workspace=%s, venv_dir=%s", plugin_id, workspace.root, venv_dir)
+        create_command = [sys.executable, "-m", "venv", "--without-pip", str(venv_dir)]
+        create_result = await run_subprocess(
+            create_command,
+            settings=settings,
+            phase_ctx=pre_phase,
+            cwd=workspace.root,
+            timeout_ms=remaining_timeout_ms(budget, settings, phase_ctx=pre_phase),
+            idle_timeout_ms=config.idle_timeout_ms,
+            stdout_queue=stdout_queue,
+            stream_name="venv",
+        )
+        if create_result.returncode != 0:
+            raise_failed_subprocess_error(
+                phase_ctx=pre_phase,
+                step="create_venv",
+                result=create_result,
+                message=f"Failed to create venv: {create_result.stderr.strip() or 'unknown error'}",
+                code="venv_create_failed",
+            )
+        await complete_phase_event(
+            stdout_queue,
+            pre_phase,
+            step="create_venv",
+            venv_dir=str(venv_dir),
+        )
+        logger.info("[%s] Venv created: venv_dir=%s", plugin_id, venv_dir)
+
+    if config.packages and not cached_dependencies_match(venv_dir, config):
         dep_phase = await emit_phase_event(
             stdout_queue,
             plugin_id,
@@ -942,10 +1051,12 @@ async def ensure_venv(
                 message=f"Failed to install packages: {install_result.stderr.strip() or 'unknown error'}",
                 code="package_install_failed",
             )
+        write_dependency_marker(venv_dir, config)
         await complete_phase_event(
             stdout_queue,
             dep_phase,
             packages=config.packages,
+            dependency_marker=str(dependency_marker_path(venv_dir)),
             stdout_bytes=install_result.progress.stdout_size + bootstrap_result.progress.stdout_size,
             stderr_bytes=install_result.progress.stderr_size + bootstrap_result.progress.stderr_size,
         )
@@ -955,6 +1066,20 @@ async def ensure_venv(
             venv_python,
             config.packages,
         )
+    elif config.packages:
+        await emit_runtime_event(
+            stdout_queue,
+            event="venv",
+            data={
+                "plugin_id": plugin_id,
+                "phase": PHASE_DEP_INSTALL,
+                "line": "Dependencies already match cached marker",
+                "venv_key": config.venv_key,
+                "venv_dir": str(venv_dir),
+                "packages": config.packages,
+            },
+        )
+        logger.info("[%s] Dependencies already match cached marker: venv_dir=%s", plugin_id, venv_dir)
     else:
         await emit_runtime_event(
             stdout_queue,

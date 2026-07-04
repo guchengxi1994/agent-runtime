@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+import asyncio
+import json
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .agent import AgentRequestError, AgentRuntime
 from .config import load_settings
 from .logging_utils import setup_logging
 from .models import AgentDefinition, ChatRequest, ChatResponse, SkillPackage, UserContext
+from .models import RuntimeStepTrace
 from .registry import FileRegistry, RegistryError
 
 settings = load_settings()
@@ -129,3 +133,40 @@ async def chat(request: ChatRequest) -> ChatResponse:
         return await runtime.chat(request)
     except AgentRequestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/chat/stream")
+async def chat_stream(request: ChatRequest) -> StreamingResponse:
+    async def event_stream():
+        queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+        def on_step(step: RuntimeStepTrace) -> None:
+            queue.put_nowait({"event": "step", "data": step.model_dump(mode="json")})
+
+        async def worker() -> None:
+            try:
+                response = await runtime.chat(request, on_step=on_step)
+                await queue.put({"event": "message", "data": response.model_dump(mode="json")})
+                await queue.put({"event": "done", "data": {"conversation_id": response.conversation_id}})
+            except AgentRequestError as exc:
+                await queue.put({"event": "error", "data": {"error": str(exc)}})
+            except Exception as exc:
+                await queue.put({"event": "error", "data": {"error": str(exc)}})
+
+        task = asyncio.create_task(worker())
+        try:
+            while True:
+                item = await queue.get()
+                event = str(item["event"])
+                data = item["data"]
+                yield f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+                if event in {"done", "error"}:
+                    break
+        finally:
+            await task
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers=NO_CACHE_HEADERS,
+    )

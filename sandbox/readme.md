@@ -152,6 +152,7 @@ def execute(params: dict):
 
 - 每次执行创建独立任务目录。
 - venv 按 skill 依赖缓存，任务目录仍按次清理。
+- cached venv 会写入 `.agent_runtime_dependencies.json`；如果 marker 缺失或与当前 `packages` 不匹配，sandbox 会在复用前自动重新同步依赖。
 - 子进程使用独立进程组，超时会终止整棵进程树。
 - Linux 下会施加 `RLIMIT_CPU`、`RLIMIT_AS`、`RLIMIT_FSIZE`、`RLIMIT_NPROC`、`RLIMIT_NOFILE`。
 - 默认只继承白名单环境变量。
