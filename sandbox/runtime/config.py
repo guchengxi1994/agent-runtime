@@ -21,10 +21,20 @@ def load_dotenv() -> None:
                 continue
             key, value = line.split("=", 1)
             key = key.strip()
-            value = value.strip().strip("\"'")
-            if key and key not in os.environ:
+            value = parse_dotenv_value(value)
+            if key:
                 os.environ[key] = value
         return
+
+
+def parse_dotenv_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    comment_start = value.find(" #")
+    if comment_start >= 0:
+        value = value[:comment_start].rstrip()
+    return value
 
 
 def env_file_candidates() -> list[Path]:

@@ -41,6 +41,7 @@ def make_settings(tmp_path) -> AgentRuntimeSettings:
         host="127.0.0.1",
         port=8010,
         model="test-model",
+        openai_api_key="test-key",
         openai_base_url=None,
         reasoning_effort=None,
         expose_reasoning_content=False,
@@ -104,7 +105,8 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
         "\n".join(
             [
                 "AGENT_RUNTIME_MODEL=test-reasoning-model",
-                "AGENT_RUNTIME_OPENAI_BASE_URL=https://llm-gateway.example/v1",
+                "OPENAI_API_KEY=test-env-key # local development key",
+                "OPENAI_BASE_URL=https://llm-gateway.example/v1",
                 "AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=true",
                 f"AGENT_RUNTIME_REGISTRY_DIR={tmp_path / 'registry'}",
             ]
@@ -113,7 +115,7 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("AGENT_RUNTIME_ENV_FILE", str(env_file))
     monkeypatch.delenv("AGENT_RUNTIME_MODEL", raising=False)
-    monkeypatch.delenv("AGENT_RUNTIME_OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("AGENT_RUNTIME_EXPOSE_REASONING_CONTENT", raising=False)
     monkeypatch.delenv("AGENT_RUNTIME_REGISTRY_DIR", raising=False)
@@ -121,8 +123,37 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
     settings = load_settings()
 
     assert settings.model == "test-reasoning-model"
+    assert settings.openai_api_key == "test-env-key"
     assert settings.openai_base_url == "https://llm-gateway.example/v1"
+    assert settings.env_file_loaded == str(env_file.resolve())
+    assert settings.openai_api_key_source == f"dotenv:{env_file.resolve()}"
+    assert settings.openai_base_url_source == f"dotenv:{env_file.resolve()}"
     assert settings.expose_reasoning_content is True
+
+
+def test_env_file_overrides_inherited_openai_env(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "OPENAI_API_KEY=dotenv-key",
+                "OPENAI_BASE_URL=https://dotenv.example/v1",
+                f"AGENT_RUNTIME_REGISTRY_DIR={tmp_path / 'registry'}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENT_RUNTIME_ENV_FILE", str(env_file))
+    monkeypatch.setenv("OPENAI_API_KEY", "inherited-process-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://process.example/v1")
+    monkeypatch.delenv("AGENT_RUNTIME_REGISTRY_DIR", raising=False)
+
+    settings = load_settings()
+
+    assert settings.openai_api_key == "dotenv-key"
+    assert settings.openai_base_url == "https://dotenv.example/v1"
+    assert settings.openai_api_key_source == f"dotenv:{env_file.resolve()}"
+    assert settings.openai_base_url_source == f"dotenv:{env_file.resolve()}"
 
 
 def test_activate_skill_returns_full_harness_without_backend_parsing(tmp_path):

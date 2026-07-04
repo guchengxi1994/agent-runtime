@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import logging
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -21,10 +21,8 @@ from .models import (
 )
 from .permissions import is_allowed
 from .registry import FileRegistry
+from .logging_utils import logger
 from .runner_client import SandboxClient
-
-
-logger = logging.getLogger("agent_runtime.steps")
 
 
 BASE_SYSTEM_PROMPT = """You are an enterprise agent runtime.
@@ -122,8 +120,22 @@ class AgentRuntime:
         self.settings = settings
         self.registry = registry
         openai_kwargs: dict[str, Any] = {}
+        if settings.openai_api_key:
+            openai_kwargs["api_key"] = settings.openai_api_key
         if settings.openai_base_url:
             openai_kwargs["base_url"] = settings.openai_base_url
+        logger.info(
+            "OpenAI client config: model=%s base_url=%s base_url_source=%s api_key_present=%s api_key_source=%s api_key_masked=%s api_key_length=%s api_key_sha256=%s env_file=%s",
+            settings.model,
+            settings.openai_base_url or "(default)",
+            settings.openai_base_url_source,
+            bool(settings.openai_api_key),
+            settings.openai_api_key_source,
+            self._mask_secret(settings.openai_api_key),
+            len(settings.openai_api_key or ""),
+            self._secret_fingerprint(settings.openai_api_key),
+            settings.env_file_loaded or "(none)",
+        )
         self.openai = AsyncOpenAI(**openai_kwargs)
         self.runner = SandboxClient(settings.sandbox_url, settings.request_timeout_seconds)
         self.conversations: dict[str, ConversationState] = {}
@@ -642,3 +654,17 @@ class AgentRuntime:
         sanitized.pop("reasoning_content", None)
         sanitized.pop("reasoning", None)
         return sanitized
+
+    @staticmethod
+    def _mask_secret(value: str | None) -> str:
+        if not value:
+            return "(missing)"
+        if len(value) <= 8:
+            return "*" * len(value)
+        return f"{value[:4]}...{value[-4:]}"
+
+    @staticmethod
+    def _secret_fingerprint(value: str | None) -> str:
+        if not value:
+            return "(missing)"
+        return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]

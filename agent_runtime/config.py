@@ -5,12 +5,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-def load_dotenv() -> None:
+@dataclass(frozen=True)
+class DotenvLoadResult:
+    path: Path | None
+    loaded_keys: frozenset[str]
+
+
+def load_dotenv() -> DotenvLoadResult:
     env_file = os.getenv("AGENT_RUNTIME_ENV_FILE") or os.getenv("ENV_FILE")
     candidates = [Path(env_file)] if env_file else env_file_candidates()
     for path in candidates:
         if not path.is_file():
             continue
+        loaded_keys: set[str] = set()
         for raw_line in path.read_text(encoding="utf-8").splitlines():
             line = raw_line.strip()
             if not line or line.startswith("#"):
@@ -21,10 +28,22 @@ def load_dotenv() -> None:
                 continue
             key, value = line.split("=", 1)
             key = key.strip()
-            value = value.strip().strip("\"'")
-            if key and key not in os.environ:
+            value = parse_dotenv_value(value)
+            if key:
                 os.environ[key] = value
-        return
+                loaded_keys.add(key)
+        return DotenvLoadResult(path=path.resolve(), loaded_keys=frozenset(loaded_keys))
+    return DotenvLoadResult(path=None, loaded_keys=frozenset())
+
+
+def parse_dotenv_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    comment_start = value.find(" #")
+    if comment_start >= 0:
+        value = value[:comment_start].rstrip()
+    return value
 
 
 def env_file_candidates() -> list[Path]:
@@ -54,6 +73,15 @@ def optional_env(*keys: str) -> str | None:
     return None
 
 
+def env_source(key: str, dotenv: DotenvLoadResult) -> str:
+    value = os.getenv(key)
+    if not value or not value.strip():
+        return "unset"
+    if key in dotenv.loaded_keys and dotenv.path is not None:
+        return f"dotenv:{dotenv.path}"
+    return "process"
+
+
 def bool_env(key: str, fallback: bool = False) -> bool:
     value = os.getenv(key)
     if value is None:
@@ -66,6 +94,7 @@ class AgentRuntimeSettings:
     host: str
     port: int
     model: str
+    openai_api_key: str | None
     openai_base_url: str | None
     reasoning_effort: str | None
     expose_reasoning_content: bool
@@ -74,6 +103,9 @@ class AgentRuntimeSettings:
     admin_token: str | None
     max_runtime_rounds: int
     request_timeout_seconds: float
+    env_file_loaded: str | None = None
+    openai_api_key_source: str = "unset"
+    openai_base_url_source: str = "unset"
 
     @property
     def admin_auth_enabled(self) -> bool:
@@ -85,13 +117,14 @@ class AgentRuntimeSettings:
 
 
 def load_settings() -> AgentRuntimeSettings:
-    load_dotenv()
+    dotenv = load_dotenv()
     registry_dir = Path(env("AGENT_RUNTIME_REGISTRY_DIR", "./registry")).resolve()
     settings = AgentRuntimeSettings(
         host=env("AGENT_RUNTIME_HOST", "0.0.0.0"),
         port=int(env("AGENT_RUNTIME_PORT", "8010")),
         model=env("AGENT_RUNTIME_MODEL", "gpt-4.1-mini"),
-        openai_base_url=optional_env("AGENT_RUNTIME_OPENAI_BASE_URL", "OPENAI_BASE_URL"),
+        openai_api_key=optional_env("OPENAI_API_KEY"),
+        openai_base_url=optional_env("OPENAI_BASE_URL"),
         reasoning_effort=optional_env("AGENT_RUNTIME_REASONING_EFFORT"),
         expose_reasoning_content=bool_env("AGENT_RUNTIME_EXPOSE_REASONING_CONTENT", False),
         registry_dir=registry_dir,
@@ -99,7 +132,9 @@ def load_settings() -> AgentRuntimeSettings:
         admin_token=os.getenv("AGENT_RUNTIME_ADMIN_TOKEN") or None,
         max_runtime_rounds=int(env("AGENT_RUNTIME_MAX_RUNTIME_ROUNDS", "6")),
         request_timeout_seconds=float(env("AGENT_RUNTIME_REQUEST_TIMEOUT_SECONDS", "600")),
+        env_file_loaded=str(dotenv.path) if dotenv.path else None,
+        openai_api_key_source=env_source("OPENAI_API_KEY", dotenv),
+        openai_base_url_source=env_source("OPENAI_BASE_URL", dotenv),
     )
     settings.ensure_directories()
     return settings
-

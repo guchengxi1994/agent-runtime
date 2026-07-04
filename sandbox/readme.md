@@ -1,5 +1,7 @@
 # Agent Runtime Sandbox
 
+> 这个sandbox是基于 [Artisan Plugin](https://github.com/AI-change-the-world/Artisan) 修改的
+
 这是独立的 Python skill 执行服务。它不负责规划、不读取 `registry/skills`，也不保存工具目录；调用方必须把要执行的 skill 脚本、参数、上下文和执行策略通过 HTTP 传进来。
 
 ## 职责边界

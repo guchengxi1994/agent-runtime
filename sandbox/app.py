@@ -30,8 +30,8 @@ from runtime.process import (
     validate_plugin_runtime,
 )
 
-setup_logging()
 settings = load_settings()
+setup_logging()
 
 active_executions = 0
 active_execution_lock = asyncio.Lock()

@@ -27,7 +27,7 @@
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填入 OPENAI_API_KEY、AGENT_RUNTIME_MODEL、AGENT_RUNTIME_OPENAI_BASE_URL 等
+# 编辑 .env，填入 OPENAI_API_KEY、AGENT_RUNTIME_MODEL、OPENAI_BASE_URL 等
 docker compose up --build
 ```
 
@@ -47,7 +47,7 @@ cp .env.example .env
 # 编辑 .env
 ```
 
-`agent_runtime` 和 `sandbox` 都会从当前目录或父目录自动加载 `.env`。真实 `.env` 已被 `.gitignore` 忽略，不要提交。
+`agent_runtime` 和 `sandbox` 都会从当前目录或父目录自动加载 `.env`。本地 `.env` 会覆盖同名继承环境变量，避免 IDE/终端进程里残留的旧 key 悄悄生效。真实 `.env` 已被 `.gitignore` 忽略，不要提交。
 
 先启动 sandbox：
 
@@ -166,12 +166,11 @@ metadata:
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | 无 | OpenAI SDK 使用 |
+| `OPENAI_API_KEY` | 无 | OpenAI-compatible provider API key |
 | `OPENAI_BASE_URL` | 空 | OpenAI-compatible provider base URL |
 | `AGENT_RUNTIME_HOST` | `0.0.0.0` | 服务监听地址 |
 | `AGENT_RUNTIME_PORT` | `8010` | 服务端口 |
 | `AGENT_RUNTIME_MODEL` | `gpt-4.1-mini` | OpenAI 模型 |
-| `AGENT_RUNTIME_OPENAI_BASE_URL` | 空 | 覆盖 `OPENAI_BASE_URL` 的模型 base URL |
 | `AGENT_RUNTIME_REASONING_EFFORT` | 空 | 可选，仅在 provider/model 支持时传给 Chat Completions |
 | `AGENT_RUNTIME_EXPOSE_REASONING_CONTENT` | `false` | 是否在 `steps.kind=thinking` 中展示兼容接口返回的 reasoning 文本 |
 | `AGENT_RUNTIME_SANDBOX_URL` | `http://127.0.0.1:8001` | sandbox 地址 |
@@ -180,6 +179,8 @@ metadata:
 | `AGENT_RUNTIME_MAX_RUNTIME_ROUNDS` | `6` | 单轮对话最大 runtime 调用轮次 |
 | `AGENT_RUNTIME_REQUEST_TIMEOUT_SECONDS` | `600` | 调用 sandbox 的 HTTP 超时 |
 | `AGENT_RUNTIME_LOG_LEVEL` | `INFO` | runtime 控制台日志等级 |
+
+启动时 runtime 会输出一条 OpenAI client 配置日志，包含 `model`、`base_url`、`base_url_source`、`api_key_present`、`api_key_source`、脱敏后的 `api_key_masked`、key 长度、`api_key_sha256` 短指纹和 `env_file`。不会输出完整 API key。
 
 ## 优化细则
 
