@@ -121,9 +121,9 @@ def execute(params: dict):
   "timeout_ms": 60000,
   "idle_timeout_ms": 30000,
   "packages": ["requests==2.32.3"],
-  "pip_index_url": "https://pypi.tuna.tsinghua.edu.cn/simple",
+  "pip_index_url": "https://mirrors.aliyun.com/pypi/simple",
   "pip_extra_index_url": "",
-  "pip_trusted_host": "pypi.tuna.tsinghua.edu.cn",
+  "pip_trusted_host": "mirrors.aliyun.com",
   "env": {
     "NON_SECRET_FLAG": "1"
   }
@@ -144,7 +144,7 @@ def execute(params: dict):
 执行过程按阶段返回错误和日志：
 
 - `pre-execute`: 创建任务目录、写入脚本和 payload、创建或复用 venv
-- `dep-install`: bootstrap pip 并安装依赖
+- `dep-install`: 用 `ensurepip` 离线 bootstrap pip，然后按 `packages` 安装依赖
 - `execute`: 启动 runner 并调用 `execute(params)`
 - `post-execute`: 清理任务目录
 
@@ -206,6 +206,6 @@ docker compose up --build
 | `ARTISAN_PLUGIN_MAX_IDLE_TIMEOUT` | `300000` | 单次执行最大空闲超时 |
 | `ARTISAN_PLUGIN_MAX_BODY_BYTES` | `1048576` | 请求体大小限制 |
 | `ARTISAN_PLUGIN_MAX_CONCURRENCY` | `8` | 最大并发数 |
-| `ARTISAN_PLUGIN_PIP_INDEX_URL` | `https://pypi.tuna.tsinghua.edu.cn/simple` | 默认 pip 源 |
+| `ARTISAN_PLUGIN_PIP_INDEX_URL` | `https://mirrors.aliyun.com/pypi/simple` | 默认 pip 源 |
 | `ARTISAN_PLUGIN_MAX_STDOUT_BYTES` | `1048576` | stdout 上限 |
 | `ARTISAN_PLUGIN_MAX_STDERR_BYTES` | `1048576` | stderr 上限 |

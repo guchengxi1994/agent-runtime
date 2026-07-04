@@ -984,29 +984,21 @@ async def ensure_venv_unlocked(
             pip_index_url=config.pip_index_url,
         )
         logger.info(
-            "[%s] Bootstrapping pip in venv: venv_python=%s, packages=%s, pip_index_url=%s",
+            "[%s] Bootstrapping pip in venv with ensurepip: venv_python=%s, packages=%s, pip_index_url=%s",
             plugin_id,
             venv_python,
             config.packages,
             config.pip_index_url,
         )
-        bootstrap_command = [
-            sys.executable,
-            "-m",
-            "pip",
-            "--python",
-            str(venv_python),
-            "install",
-            "--upgrade",
-            "pip",
-            "setuptools",
-            "wheel",
-        ]
+        bootstrap_command = [str(venv_python), "-m", "ensurepip", "--upgrade"]
+        bootstrap_env = build_process_env(config, venv_dir, workspace.tmp_dir, settings)
+        for key in ("PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "PIP_TRUSTED_HOST"):
+            bootstrap_env.pop(key, None)
         bootstrap_result = await run_subprocess(
             bootstrap_command,
             settings=settings,
             phase_ctx=dep_phase,
-            env=build_process_env(config, venv_dir, workspace.tmp_dir, settings),
+            env=bootstrap_env,
             cwd=workspace.root,
             timeout_ms=remaining_timeout_ms(budget, settings, phase_ctx=dep_phase),
             idle_timeout_ms=config.idle_timeout_ms,
@@ -1024,11 +1016,9 @@ async def ensure_venv_unlocked(
         logger.info("[%s] Pip bootstrap completed: venv_python=%s", plugin_id, venv_python)
 
         install_command = [
-            sys.executable,
+            str(venv_python),
             "-m",
             "pip",
-            "--python",
-            str(venv_python),
             "install",
             *config.packages,
         ]

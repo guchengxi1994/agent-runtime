@@ -129,13 +129,13 @@ def load_settings() -> RuntimeSettings:
         process_nofile=int(get_env("ARTISAN_PLUGIN_PROCESS_NOFILE", "512")),
         default_pip_index_url=get_env(
             "ARTISAN_PLUGIN_PIP_INDEX_URL",
-            "https://pypi.tuna.tsinghua.edu.cn/simple",
+            "https://mirrors.aliyun.com/pypi/simple",
         )
         or None,
         default_pip_extra_index_url=get_env("ARTISAN_PLUGIN_PIP_EXTRA_INDEX_URL", "") or None,
         default_pip_trusted_host=get_env(
             "ARTISAN_PLUGIN_PIP_TRUSTED_HOST",
-            "pypi.tuna.tsinghua.edu.cn",
+            "mirrors.aliyun.com",
         )
         or None,
         runtime_build="python-venv-stateless-v2",
