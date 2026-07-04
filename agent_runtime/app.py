@@ -143,9 +143,12 @@ async def chat_stream(request: ChatRequest) -> StreamingResponse:
         def on_step(step: RuntimeStepTrace) -> None:
             queue.put_nowait({"event": "step", "data": step.model_dump(mode="json")})
 
+        def on_delta(payload: dict[str, object]) -> None:
+            queue.put_nowait({"event": "delta", "data": payload})
+
         async def worker() -> None:
             try:
-                response = await runtime.chat(request, on_step=on_step)
+                response = await runtime.chat(request, on_step=on_step, on_delta=on_delta)
                 await queue.put({"event": "message", "data": response.model_dump(mode="json")})
                 await queue.put({"event": "done", "data": {"conversation_id": response.conversation_id}})
             except AgentRequestError as exc:

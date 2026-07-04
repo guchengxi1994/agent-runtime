@@ -28,7 +28,7 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
-function addMessage(role, text, steps = [], requestedInputs = []) {
+function addMessage(role, text, steps = [], requestedInputs = [], liveStream = null) {
   const messages = $("messages");
   const item = document.createElement("div");
   item.className = `message ${role}`;
@@ -37,6 +37,7 @@ function addMessage(role, text, steps = [], requestedInputs = []) {
     <div class="avatar">${avatar}</div>
     <div class="message-body">
       <div class="bubble">${escapeText(text)}</div>
+      ${role === "assistant" && liveStream ? renderLiveStream(liveStream) : ""}
       ${role === "assistant" && requestedInputs.length ? renderRequestedInputs(requestedInputs) : ""}
       ${role === "assistant" && steps.length ? renderRunLog(steps) : ""}
     </div>
@@ -46,12 +47,15 @@ function addMessage(role, text, steps = [], requestedInputs = []) {
   return item;
 }
 
-function updateAssistantMessage(item, text, steps = [], requestedInputs = []) {
+function updateAssistantMessage(item, text, steps = [], requestedInputs = [], liveStream = null) {
   const bubble = item.querySelector(".bubble");
   const body = item.querySelector(".message-body");
   bubble.textContent = text;
-  for (const existing of body.querySelectorAll(".requested-inputs, .run-log")) {
+  for (const existing of body.querySelectorAll(".live-stream, .requested-inputs, .run-log")) {
     existing.remove();
+  }
+  if (liveStream) {
+    body.insertAdjacentHTML("beforeend", renderLiveStream(liveStream));
   }
   if (requestedInputs.length) {
     body.insertAdjacentHTML("beforeend", renderRequestedInputs(requestedInputs));
@@ -60,6 +64,54 @@ function updateAssistantMessage(item, text, steps = [], requestedInputs = []) {
     body.insertAdjacentHTML("beforeend", renderRunLog(steps));
   }
   $("messages").scrollTop = $("messages").scrollHeight;
+}
+
+function createLiveStreamState() {
+  return {
+    thinking: "",
+    reasoningRedacted: false,
+    toolCalls: {},
+  };
+}
+
+function liveStreamHasContent(liveStream) {
+  return Boolean(
+    liveStream &&
+      (liveStream.thinking ||
+        liveStream.reasoningRedacted ||
+        Object.keys(liveStream.toolCalls || {}).length),
+  );
+}
+
+function renderLiveStream(liveStream) {
+  if (!liveStreamHasContent(liveStream)) {
+    return "";
+  }
+  const thinking = liveStream.thinking
+    ? `<div class="live-block"><strong>Thinking</strong><p>${escapeText(liveStream.thinking)}</p></div>`
+    : liveStream.reasoningRedacted
+      ? `<div class="live-block muted"><strong>Thinking</strong><p>模型正在规划，reasoning 已按配置隐藏。</p></div>`
+      : "";
+  const toolRows = Object.values(liveStream.toolCalls || {})
+    .map((tool) => {
+      const name = tool.name || "选择工具中";
+      const args = tool.arguments || "";
+      const preview = args.length > 900 ? `${args.slice(0, 900)}...` : args;
+      return `
+        <div class="live-block tool">
+          <strong>Tool Call · ${escapeText(name)}</strong>
+          ${preview ? `<pre>${escapeText(preview)}</pre>` : `<p>正在生成调用参数...</p>`}
+        </div>
+      `;
+    })
+    .join("");
+  return `
+    <section class="live-stream" aria-label="实时规划">
+      <div class="live-stream-title">实时规划</div>
+      ${thinking}
+      ${toolRows}
+    </section>
+  `;
 }
 
 function renderRequestedInputs(inputs) {
@@ -156,8 +208,20 @@ async function sendMessage(event) {
   addMessage("user", message);
   const assistantItem = addMessage("assistant", "运行中...");
   const streamedSteps = [];
+  const liveStream = createLiveStreamState();
+  let streamedText = "";
   button.disabled = true;
   button.textContent = "执行中";
+
+  function renderLive() {
+    updateAssistantMessage(
+      assistantItem,
+      streamedText || "运行中...",
+      streamedSteps,
+      [],
+      liveStreamHasContent(liveStream) ? liveStream : null,
+    );
+  }
 
   try {
     const response = await fetch("/chat/stream", {
@@ -172,7 +236,29 @@ async function sendMessage(event) {
     await consumeEventStream(response.body, {
       step(step) {
         streamedSteps.push(step);
-        updateAssistantMessage(assistantItem, "运行中...", streamedSteps);
+        renderLive();
+      },
+      delta(payload) {
+        if (payload.kind === "assistant" && payload.delta) {
+          streamedText += payload.delta;
+        } else if (payload.kind === "thinking") {
+          if (payload.redacted) {
+            liveStream.reasoningRedacted = true;
+          } else if (payload.delta) {
+            liveStream.thinking += payload.delta;
+          }
+        } else if (payload.kind === "tool_call") {
+          const key = String(payload.tool_call_index ?? payload.tool_call_id ?? "0");
+          const tool = liveStream.toolCalls[key] || { name: "", arguments: "" };
+          if (payload.phase === "name") {
+            tool.name = payload.name || `${tool.name}${payload.delta || ""}`;
+          } else if (payload.phase === "arguments") {
+            tool.name = payload.name || tool.name;
+            tool.arguments += payload.delta || "";
+          }
+          liveStream.toolCalls[key] = tool;
+        }
+        renderLive();
       },
       message(payload) {
         state.conversationId = payload.conversation_id;
@@ -184,6 +270,7 @@ async function sendMessage(event) {
           `${payload.message || "(empty response)"}${suffix}`,
           payload.steps || streamedSteps,
           requestedInputs,
+          null,
         );
       },
       error(payload) {
@@ -218,6 +305,8 @@ async function consumeEventStream(body, handlers) {
       }
       if (event.type === "step" && handlers.step) {
         handlers.step(event.data);
+      } else if (event.type === "delta" && handlers.delta) {
+        handlers.delta(event.data);
       } else if (event.type === "message" && handlers.message) {
         handlers.message(event.data);
       } else if (event.type === "error" && handlers.error) {

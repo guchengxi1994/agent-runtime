@@ -1,6 +1,6 @@
 ---
 name: web-search
-description: Search the web for research sources using a configured search provider.
+description: API-backed web search for research sources using Tavily, Serper, or Bing when configured. If API keys are missing, invalid, rate-limited, or this skill otherwise cannot proceed, use the no-API-key web-search-quark skill as an alternate search capability.
 metadata:
   owner: runtime
   category: research
@@ -33,4 +33,4 @@ metadata:
 
 # Web Search
 
-Use this executable skill for broad source discovery. Prefer `count=20` for exhaustive research phases. If the result reports `missing_search_provider`, ask the user or operator to configure one of `TAVILY_API_KEY`, `SERPER_API_KEY`, or `BING_SEARCH_API_KEY` in the sandbox environment.
+Use this executable skill for broad source discovery when an API-backed provider is configured. Prefer `count=20` for exhaustive research phases. If the result reports `missing_search_provider` or a provider error, continue with another suitable search skill from the available catalog such as `web-search-quark`, or ask the operator to configure `TAVILY_API_KEY`, `SERPER_API_KEY`, or `BING_SEARCH_API_KEY`.

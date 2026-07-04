@@ -1,6 +1,6 @@
 definition = {
     "name": "web-search",
-    "description": "Search web sources through Tavily, Serper, or Bing when configured.",
+    "description": "API-backed web search through Tavily, Serper, or Bing when configured.",
 }
 
 import os
@@ -16,12 +16,21 @@ def execute(params):
     count = max(1, min(count, 20))
     freshness = str(params.get("freshness", "")).strip() or None
 
-    if os.getenv("TAVILY_API_KEY"):
-        return search_tavily(query, count, freshness)
-    if os.getenv("SERPER_API_KEY"):
-        return search_serper(query, count)
-    if os.getenv("BING_SEARCH_API_KEY"):
-        return search_bing(query, count, freshness)
+    try:
+        if os.getenv("TAVILY_API_KEY"):
+            return search_tavily(query, count, freshness)
+        if os.getenv("SERPER_API_KEY"):
+            return search_serper(query, count)
+        if os.getenv("BING_SEARCH_API_KEY"):
+            return search_bing(query, count, freshness)
+    except Exception as exc:
+        return {
+            "success": False,
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+            "query": query,
+            "results": [],
+        }
 
     return {
         "success": False,

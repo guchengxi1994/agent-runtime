@@ -152,6 +152,7 @@ class AgentRequestError(ValueError):
 
 
 StepCallback = Callable[[RuntimeStepTrace], Awaitable[None] | None]
+StreamCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
 class AgentRuntime:
@@ -180,7 +181,12 @@ class AgentRuntime:
         self.conversations: dict[str, ConversationState] = {}
         self.executions: list[dict[str, Any]] = []
 
-    async def chat(self, request: ChatRequest, on_step: StepCallback | None = None) -> ChatResponse:
+    async def chat(
+        self,
+        request: ChatRequest,
+        on_step: StepCallback | None = None,
+        on_delta: StreamCallback | None = None,
+    ) -> ChatResponse:
         agent = self._resolve_agent(request)
         conversation = self._get_or_create_conversation(request, agent)
         run_id = f"run_{uuid.uuid4().hex}"
@@ -228,17 +234,18 @@ class AgentRuntime:
                     "tool_candidates": [tool["function"]["name"] for tool in runtime_tools],
                 },
             )
-            completion = await self.openai.chat.completions.create(
-                **openai_kwargs,
+            model_turn = await self._complete_model_turn(
+                openai_kwargs,
+                on_delta=on_delta,
+                run_id=run_id,
+                round_index=round_index,
             )
-            choice = completion.choices[0]
-            assistant_message = choice.message.model_dump(exclude_none=True)
-            reasoning_text = self._extract_reasoning_text(choice.message, assistant_message)
-            assistant_message = self._sanitize_assistant_message(assistant_message)
+            assistant_message = model_turn["assistant_message"]
+            reasoning_text = model_turn["reasoning_text"]
             messages.append(assistant_message)
             conversation.messages.append(assistant_message)
 
-            tool_calls = choice.message.tool_calls or []
+            tool_calls = model_turn["tool_calls"]
             self._record_step(
                 steps,
                 on_step,
@@ -255,7 +262,7 @@ class AgentRuntime:
                 },
             )
             if not tool_calls:
-                content = choice.message.content or ""
+                content = str(model_turn["content"] or "")
                 conversation.updated_at = datetime.now(timezone.utc)
                 self._record_step(
                     steps,
@@ -277,8 +284,11 @@ class AgentRuntime:
                 )
 
             for call in tool_calls:
-                tool_name = call.function.name
-                args = self._parse_tool_arguments(call.function.arguments)
+                function = call.get("function") if isinstance(call, dict) else {}
+                function = function if isinstance(function, dict) else {}
+                tool_name = str(function.get("name") or "").strip()
+                args = self._parse_tool_arguments(str(function.get("arguments") or ""))
+                tool_call_id = str(call.get("id") or f"call_{uuid.uuid4().hex}") if isinstance(call, dict) else f"call_{uuid.uuid4().hex}"
                 execution_id: str | None = None
                 if tool_name == "activate_skill":
                     result = self._activate_skill(args, available_skills, activated_skills, conversation)
@@ -286,10 +296,10 @@ class AgentRuntime:
                         "role": "system",
                         "content": self._build_system_prompt(agent, available_skills, activated_skills),
                     }
-                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, call.id, result)
+                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "read_skill_resource":
                     result = self._read_skill_resource(args, activated_skills)
-                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, call.id, result)
+                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "request_user_input":
                     question = str(args.get("question", "")).strip() or "请补充继续执行所需的信息。"
                     fields = self._parse_requested_fields(args.get("fields"))
@@ -316,11 +326,11 @@ class AgentRuntime:
                             "run_id": run_id,
                             "field_names": [field.name for field in fields],
                         },
-                        tool_call_id=call.id,
+                        tool_call_id=tool_call_id,
                     )
                     traces.append(
                         ToolCallTrace(
-                            tool_call_id=call.id,
+                            tool_call_id=tool_call_id,
                             tool_name=tool_name,
                             arguments=args,
                             result=result,
@@ -329,7 +339,7 @@ class AgentRuntime:
                     )
                     tool_message = {
                         "role": "tool",
-                        "tool_call_id": call.id,
+                        "tool_call_id": tool_call_id,
                         "content": json.dumps(result, ensure_ascii=False),
                     }
                     assistant_question = {"role": "assistant", "content": question}
@@ -351,7 +361,7 @@ class AgentRuntime:
                             }
                             for field in fields
                         ],
-                        call.id,
+                        tool_call_id,
                     )
                     self._log_run_summary(run_id, "waiting_for_user", steps, question)
                     return ChatResponse(
@@ -368,10 +378,10 @@ class AgentRuntime:
                     skill = skill_by_name.get(tool_name)
                     if skill is None:
                         result = {"success": False, "error": f"Executable skill is not available: {tool_name}"}
-                        self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, call.id, result)
+                        self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                     elif not is_allowed(skill.permissions, request.user):
                         result = {"success": False, "error": f"Permission denied for skill: {tool_name}"}
-                        self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, call.id, result)
+                        self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                     else:
                         script = self.registry.read_skill_entrypoint(skill)
                         result = await self.runner.execute_skill(
@@ -396,13 +406,13 @@ class AgentRuntime:
                             run_id,
                             "sandbox_execution",
                             tool_name,
-                            call.id,
+                            tool_call_id,
                             result,
                             execution_id=execution_id,
                         )
                 traces.append(
                     ToolCallTrace(
-                        tool_call_id=call.id,
+                        tool_call_id=tool_call_id,
                         tool_name=tool_name,
                         arguments=args,
                         result=result,
@@ -411,7 +421,7 @@ class AgentRuntime:
                 )
                 tool_message = {
                     "role": "tool",
-                    "tool_call_id": call.id,
+                    "tool_call_id": tool_call_id,
                     "content": json.dumps(result, ensure_ascii=False),
                 }
                 messages.append(tool_message)
@@ -438,6 +448,274 @@ class AgentRuntime:
             tool_calls=traces,
             model=self.settings.model,
         )
+
+    async def _complete_model_turn(
+        self,
+        openai_kwargs: dict[str, Any],
+        *,
+        on_delta: StreamCallback | None,
+        run_id: str,
+        round_index: int,
+    ) -> dict[str, Any]:
+        if on_delta is None:
+            return await self._complete_model_turn_non_stream(openai_kwargs)
+        return await self._complete_model_turn_stream(
+            openai_kwargs,
+            on_delta=on_delta,
+            run_id=run_id,
+            round_index=round_index,
+        )
+
+    async def _complete_model_turn_non_stream(self, openai_kwargs: dict[str, Any]) -> dict[str, Any]:
+        completion = await self.openai.chat.completions.create(**openai_kwargs)
+        choice = completion.choices[0]
+        assistant_message = choice.message.model_dump(exclude_none=True)
+        reasoning_text = self._extract_reasoning_text(choice.message, assistant_message)
+        assistant_message = self._sanitize_assistant_message(assistant_message)
+        content = choice.message.content or assistant_message.get("content") or ""
+        tool_calls = self._normalize_tool_calls(choice.message.tool_calls or assistant_message.get("tool_calls") or [])
+        if tool_calls:
+            assistant_message["tool_calls"] = tool_calls
+        if content:
+            assistant_message["content"] = content
+        return {
+            "assistant_message": assistant_message,
+            "content": content,
+            "reasoning_text": reasoning_text,
+            "tool_calls": tool_calls,
+        }
+
+    async def _complete_model_turn_stream(
+        self,
+        openai_kwargs: dict[str, Any],
+        *,
+        on_delta: StreamCallback,
+        run_id: str,
+        round_index: int,
+    ) -> dict[str, Any]:
+        stream = await self.openai.chat.completions.create(**{**openai_kwargs, "stream": True})
+        content_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_call_parts: dict[int, dict[str, Any]] = {}
+        reasoning_redacted_emitted = False
+
+        async for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+            delta_payload = self._model_dump(delta)
+
+            content_delta = self._extract_delta_string(delta, delta_payload, "content")
+            if content_delta:
+                content_parts.append(content_delta)
+                self._emit_delta(
+                    on_delta,
+                    {
+                        "kind": "assistant",
+                        "delta": content_delta,
+                        "run_id": run_id,
+                        "round": round_index,
+                    },
+                )
+
+            reasoning_delta = self._extract_delta_reasoning(delta, delta_payload)
+            if reasoning_delta:
+                reasoning_parts.append(reasoning_delta)
+                if self.settings.expose_reasoning_content:
+                    self._emit_delta(
+                        on_delta,
+                        {
+                            "kind": "thinking",
+                            "delta": reasoning_delta,
+                            "redacted": False,
+                            "run_id": run_id,
+                            "round": round_index,
+                        },
+                    )
+                elif not reasoning_redacted_emitted:
+                    reasoning_redacted_emitted = True
+                    self._emit_delta(
+                        on_delta,
+                        {
+                            "kind": "thinking",
+                            "delta": "",
+                            "redacted": True,
+                            "run_id": run_id,
+                            "round": round_index,
+                        },
+                    )
+
+            for tool_call_delta in self._extract_tool_call_deltas(delta, delta_payload):
+                index = self._coerce_tool_call_index(tool_call_delta.get("index"), len(tool_call_parts))
+                current = tool_call_parts.setdefault(
+                    index,
+                    {
+                        "id": "",
+                        "type": "function",
+                        "function": {"name": "", "arguments": ""},
+                    },
+                )
+                if isinstance(tool_call_delta.get("id"), str) and tool_call_delta["id"]:
+                    current["id"] = tool_call_delta["id"]
+                if isinstance(tool_call_delta.get("type"), str) and tool_call_delta["type"]:
+                    current["type"] = tool_call_delta["type"]
+                function_delta = tool_call_delta.get("function") if isinstance(tool_call_delta.get("function"), dict) else {}
+                name_delta = function_delta.get("name")
+                if isinstance(name_delta, str) and name_delta:
+                    current["function"]["name"] += name_delta
+                    self._emit_delta(
+                        on_delta,
+                        {
+                            "kind": "tool_call",
+                            "phase": "name",
+                            "delta": name_delta,
+                            "name": current["function"]["name"],
+                            "tool_call_index": index,
+                            "tool_call_id": current["id"] or None,
+                            "run_id": run_id,
+                            "round": round_index,
+                        },
+                    )
+                arguments_delta = function_delta.get("arguments")
+                if isinstance(arguments_delta, str) and arguments_delta:
+                    current["function"]["arguments"] += arguments_delta
+                    self._emit_delta(
+                        on_delta,
+                        {
+                            "kind": "tool_call",
+                            "phase": "arguments",
+                            "delta": arguments_delta,
+                            "name": current["function"]["name"],
+                            "tool_call_index": index,
+                            "tool_call_id": current["id"] or None,
+                            "run_id": run_id,
+                            "round": round_index,
+                        },
+                    )
+
+        content = "".join(content_parts)
+        reasoning_text = "".join(reasoning_parts).strip() or None
+        tool_calls = self._finalize_stream_tool_calls(tool_call_parts)
+        assistant_message: dict[str, Any] = {"role": "assistant"}
+        if content:
+            assistant_message["content"] = content
+        if tool_calls:
+            assistant_message["tool_calls"] = tool_calls
+        return {
+            "assistant_message": assistant_message,
+            "content": content,
+            "reasoning_text": reasoning_text,
+            "tool_calls": tool_calls,
+        }
+
+    @staticmethod
+    def _model_dump(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if hasattr(value, "model_dump"):
+            dumped = value.model_dump(exclude_none=True)
+            return dumped if isinstance(dumped, dict) else {}
+        return {}
+
+    @staticmethod
+    def _extract_delta_string(delta: Any, delta_payload: dict[str, Any], key: str) -> str:
+        value = delta_payload.get(key)
+        if not isinstance(value, str):
+            value = getattr(delta, key, None)
+        return value if isinstance(value, str) else ""
+
+    @staticmethod
+    def _extract_delta_reasoning(delta: Any, delta_payload: dict[str, Any]) -> str:
+        for key in ("reasoning_content", "reasoning"):
+            value = delta_payload.get(key)
+            if isinstance(value, str):
+                return value
+        model_extra = getattr(delta, "model_extra", None)
+        if isinstance(model_extra, dict):
+            for key in ("reasoning_content", "reasoning"):
+                value = model_extra.get(key)
+                if isinstance(value, str):
+                    return value
+        return ""
+
+    def _extract_tool_call_deltas(self, delta: Any, delta_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        raw_tool_calls = delta_payload.get("tool_calls")
+        if raw_tool_calls is None:
+            raw_tool_calls = getattr(delta, "tool_calls", None)
+        if not isinstance(raw_tool_calls, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for raw in raw_tool_calls:
+            payload = self._model_dump(raw)
+            if payload:
+                normalized.append(payload)
+        return normalized
+
+    @staticmethod
+    def _coerce_tool_call_index(value: Any, fallback: int) -> int:
+        if isinstance(value, int) and value >= 0:
+            return value
+        if isinstance(value, str) and value.isdigit():
+            return int(value)
+        return fallback
+
+    @staticmethod
+    def _normalize_tool_calls(raw_tool_calls: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_tool_calls, list):
+            return []
+        normalized: list[dict[str, Any]] = []
+        for index, raw in enumerate(raw_tool_calls):
+            payload = AgentRuntime._model_dump(raw)
+            if not payload:
+                function_obj = getattr(raw, "function", None)
+                payload = {
+                    "id": getattr(raw, "id", None),
+                    "type": getattr(raw, "type", "function"),
+                    "function": {
+                        "name": getattr(function_obj, "name", None),
+                        "arguments": getattr(function_obj, "arguments", None),
+                    },
+                }
+            function = payload.get("function") if isinstance(payload.get("function"), dict) else {}
+            name = str(function.get("name") or "").strip()
+            arguments = function.get("arguments")
+            if not name:
+                continue
+            normalized.append(
+                {
+                    "id": str(payload.get("id") or f"call_{uuid.uuid4().hex}"),
+                    "type": str(payload.get("type") or "function"),
+                    "function": {
+                        "name": name,
+                        "arguments": arguments if isinstance(arguments, str) else "",
+                    },
+                }
+            )
+        return normalized
+
+    @staticmethod
+    def _finalize_stream_tool_calls(tool_call_parts: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+        tool_calls: list[dict[str, Any]] = []
+        for index in sorted(tool_call_parts):
+            item = tool_call_parts[index]
+            function = item.get("function") if isinstance(item.get("function"), dict) else {}
+            name = str(function.get("name") or "").strip()
+            if not name:
+                continue
+            tool_calls.append(
+                {
+                    "id": str(item.get("id") or f"call_{uuid.uuid4().hex}"),
+                    "type": str(item.get("type") or "function"),
+                    "function": {
+                        "name": name,
+                        "arguments": function.get("arguments") if isinstance(function.get("arguments"), str) else "",
+                    },
+                }
+            )
+        return tool_calls
 
     def _resolve_agent(self, request: ChatRequest) -> AgentDefinition:
         try:
@@ -762,6 +1040,14 @@ class AgentRuntime:
         result = on_step(step)
         if inspect.isawaitable(result):
             raise RuntimeError("Async step callbacks must be awaited through chat_stream")
+
+    @staticmethod
+    def _emit_delta(on_delta: StreamCallback | None, payload: dict[str, Any]) -> None:
+        if on_delta is None:
+            return
+        result = on_delta(payload)
+        if inspect.isawaitable(result):
+            raise RuntimeError("Async stream callbacks must be synchronous in chat_stream")
 
     @staticmethod
     def _log_run_summary(

@@ -232,6 +232,62 @@ def test_request_user_input_fills_missing_field_guidance(tmp_path):
     assert "示例" in response.requested_inputs[0].description
 
 
+def test_streaming_final_answer_emits_token_deltas(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.openai = FakeStreamingOpenAI(
+        [
+            {"content": "你"},
+            {"content": "好"},
+        ]
+    )
+    deltas = []
+
+    response = asyncio.run(runtime.chat(ChatRequest(message="打个招呼"), on_delta=deltas.append))
+
+    assert response.message == "你好"
+    assert [delta["delta"] for delta in deltas if delta["kind"] == "assistant"] == ["你", "好"]
+
+
+def test_streaming_tool_call_emits_planning_deltas(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    arguments = json.dumps(
+        {
+            "question": "需要确认研究主问题。",
+            "fields": [{"name": "primary_question"}],
+        },
+        ensure_ascii=False,
+    )
+    runtime.openai = FakeStreamingOpenAI(
+        [
+            {
+                "tool_calls": [
+                    {
+                        "index": 0,
+                        "id": "call_stream",
+                        "type": "function",
+                        "function": {"name": "request_user_input", "arguments": ""},
+                    }
+                ]
+            },
+            {"tool_calls": [{"index": 0, "function": {"arguments": arguments[:12]}}]},
+            {"tool_calls": [{"index": 0, "function": {"arguments": arguments[12:]}}]},
+        ]
+    )
+    deltas = []
+
+    response = asyncio.run(runtime.chat(ChatRequest(message="调研炼钢能耗"), on_delta=deltas.append))
+
+    assert response.status == "waiting_for_user"
+    assert any(delta["kind"] == "tool_call" and delta["phase"] == "name" for delta in deltas)
+    assert any(delta["kind"] == "tool_call" and delta["phase"] == "arguments" for delta in deltas)
+
+
 def test_frontend_entrypoint_serves_static_page():
     client = TestClient(app)
 
@@ -254,6 +310,10 @@ def test_builtin_research_skills_are_registered():
         "requests==2.32.3",
         "beautifulsoup4==4.12.3",
     ]
+    assert registry.skills["web-search-quark"].executable is True
+    assert registry.skills["web-search-quark"].execution_policy["packages"] == ["requests==2.32.3"]
+    assert "no-API-key" in registry.skills["web-search-quark"].description
+    assert "web-search-quark" in registry.skills["web-search"].description
 
 
 def make_execution_config(packages: list[str]) -> ExecutionConfig:
@@ -289,9 +349,19 @@ class FakeOpenAI:
         self.chat = FakeChat(tool_name=tool_name, arguments=arguments)
 
 
+class FakeStreamingOpenAI:
+    def __init__(self, chunks: list[dict]):
+        self.chat = FakeStreamingChat(chunks)
+
+
 class FakeChat:
     def __init__(self, *, tool_name: str, arguments: dict):
         self.completions = FakeCompletions(tool_name=tool_name, arguments=arguments)
+
+
+class FakeStreamingChat:
+    def __init__(self, chunks: list[dict]):
+        self.completions = FakeStreamingCompletions(chunks)
 
 
 class FakeCompletions:
@@ -301,6 +371,49 @@ class FakeCompletions:
 
     async def create(self, **_kwargs):
         return FakeCompletion(self.tool_name, self.arguments)
+
+
+class FakeStreamingCompletions:
+    def __init__(self, chunks: list[dict]):
+        self.chunks = chunks
+
+    async def create(self, **kwargs):
+        assert kwargs.get("stream") is True
+        return FakeAsyncStream(self.chunks)
+
+
+class FakeAsyncStream:
+    def __init__(self, chunks: list[dict]):
+        self.chunks = chunks
+
+    def __aiter__(self):
+        self._index = 0
+        return self
+
+    async def __anext__(self):
+        if self._index >= len(self.chunks):
+            raise StopAsyncIteration
+        chunk = FakeStreamChunk(self.chunks[self._index])
+        self._index += 1
+        return chunk
+
+
+class FakeStreamChunk:
+    def __init__(self, delta: dict):
+        self.choices = [FakeStreamChoice(delta)]
+
+
+class FakeStreamChoice:
+    def __init__(self, delta: dict):
+        self.delta = FakeStreamDelta(delta)
+
+
+class FakeStreamDelta:
+    def __init__(self, payload: dict):
+        self.payload = payload
+
+    def model_dump(self, exclude_none: bool = True):
+        return self.payload
 
 
 class FakeCompletion:
