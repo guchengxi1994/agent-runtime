@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 from pathlib import Path
 
@@ -341,6 +342,57 @@ def test_builtin_research_skills_are_registered():
     assert registry.skills["web-search-quark"].execution_policy["packages"] == ["requests==2.32.3"]
     assert "no-API-key" in registry.skills["web-search-quark"].description
     assert "web-search-quark" in registry.skills["web-search"].description
+    assert registry.skills["steel-energy-control"].executable is False
+    assert registry.skills["steel-process-map"].executable is True
+    assert registry.skills["steel-energy-balance"].executable is True
+    assert registry.skills["steel-savings-prioritizer"].executable is True
+    assert "steel-industry energy control" in registry.skills["steel-energy-control"].description
+
+
+def test_steel_energy_skills_execute_representative_cases():
+    process_map = load_skill_module(Path("registry/skills/steel-process-map/skill.py"))
+    energy_balance = load_skill_module(Path("registry/skills/steel-energy-balance/skill.py"))
+    prioritizer = load_skill_module(Path("registry/skills/steel-savings-prioritizer/skill.py"))
+
+    mapped = process_map.execute(
+        {
+            "process_route": "hot-rolling",
+            "product_or_grade": "hot rolled coil",
+            "boundary": "reheating furnace and mill",
+            "objective": "saving plan",
+        }
+    )
+    assert mapped["matched_route"] == "hot-rolling"
+    assert "reheating furnace" in mapped["stages"]
+    assert "steel-energy-balance if numeric energy streams are available" in mapped["next_skill_suggestions"]
+
+    balanced = energy_balance.execute(
+        {
+            "production_tonnes": 10000,
+            "product_basis": "rolled product",
+            "energy_streams": [
+                {"name": "fuel gas", "amount": 85000, "unit": "GJ", "role": "input", "category": "fuel"},
+                {"name": "electricity", "amount": 1200000, "unit": "kWh", "role": "input", "category": "electricity"},
+                {"name": "steam export", "amount": 3000, "unit": "GJ", "role": "exported", "category": "recovered"},
+            ],
+        }
+    )
+    assert balanced["gross_input_gj"] == 89320
+    assert balanced["net_input_gj"] == 86320
+    assert round(balanced["intensity_gj_per_t"], 3) == 8.632
+
+    ranked = prioritizer.execute(
+        {
+            "baseline_energy_gj_per_year": 1000000,
+            "energy_price_per_gj": 45,
+            "measures": [
+                {"name": "hot charging increase", "saving_percent": 4, "capex": 3000000},
+                {"name": "compressed air leak repair", "annual_energy_saving_gj": 8000, "capex": 100000, "risk_level": "low"},
+            ],
+        }
+    )
+    assert ranked["ranked_measures"][0]["annual_energy_saving_gj"] > 0
+    assert ranked["quick_wins"]
 
 
 def make_execution_config(packages: list[str]) -> ExecutionConfig:
@@ -355,6 +407,14 @@ def make_execution_config(packages: list[str]) -> ExecutionConfig:
         env={},
         venv_key="test_venv",
     )
+
+
+def load_skill_module(path: Path):
+    spec = importlib.util.spec_from_file_location(path.stem, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_cached_venv_requires_matching_dependency_marker(tmp_path):
