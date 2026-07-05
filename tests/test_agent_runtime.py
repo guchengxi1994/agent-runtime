@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
+from agent_runtime.artifacts import ArtifactStore
 from agent_runtime.agent import AgentRuntime
 from agent_runtime.app import app
 from agent_runtime.config import AgentRuntimeSettings, load_settings
@@ -49,6 +50,7 @@ def make_settings(tmp_path) -> AgentRuntimeSettings:
         reasoning_effort=None,
         expose_reasoning_content=False,
         registry_dir=registry_dir,
+        artifacts_dir=tmp_path / "artifacts",
         sandbox_url="http://127.0.0.1:8001",
         admin_token=None,
         max_runtime_rounds=1,
@@ -112,6 +114,7 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
                 "OPENAI_BASE_URL=https://llm-gateway.example/v1",
                 "AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=true",
                 f"AGENT_RUNTIME_REGISTRY_DIR={tmp_path / 'registry'}",
+                f"AGENT_RUNTIME_ARTIFACTS_DIR={tmp_path / 'artifacts'}",
             ]
         ),
         encoding="utf-8",
@@ -122,6 +125,7 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("AGENT_RUNTIME_EXPOSE_REASONING_CONTENT", raising=False)
     monkeypatch.delenv("AGENT_RUNTIME_REGISTRY_DIR", raising=False)
+    monkeypatch.delenv("AGENT_RUNTIME_ARTIFACTS_DIR", raising=False)
 
     settings = load_settings()
 
@@ -132,6 +136,7 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
     assert settings.openai_api_key_source == f"dotenv:{env_file.resolve()}"
     assert settings.openai_base_url_source == f"dotenv:{env_file.resolve()}"
     assert settings.expose_reasoning_content is True
+    assert settings.artifacts_dir == (tmp_path / "artifacts").resolve()
 
 
 def test_env_file_overrides_inherited_openai_env(tmp_path, monkeypatch):
@@ -225,6 +230,12 @@ def test_request_user_input_pauses_and_records_tool_result(tmp_path):
     assert conversation.pending_input_request is not None
     assert tool_messages
     assert json.loads(tool_messages[-1]["content"])["status"] == "waiting_for_user"
+    artifacts = runtime.artifacts.list_artifacts(response.conversation_id)["artifacts"]
+    model_trace = next(item for item in artifacts if item["kind"] == "model_planning")
+    model_trace_content = json.loads(runtime.artifacts.read_artifact(response.conversation_id, model_trace["artifact_id"])["content"])
+    assert model_trace["tool_name"] == "model_planning"
+    assert model_trace_content["request"]["messages"][0]["role"] == "system"
+    assert model_trace_content["response"]["tool_calls"][0]["function"]["name"] == "request_user_input"
 
 
 def test_request_user_input_does_not_synthesize_missing_field_guidance(tmp_path):
@@ -358,6 +369,217 @@ def test_cached_venv_requires_matching_dependency_marker(tmp_path):
     assert cached_dependencies_match(venv_dir, config) is True
     assert cached_dependencies_match(venv_dir, make_execution_config(["requests==2.32.2"])) is False
     assert cached_dependencies_match(venv_dir, make_execution_config([])) is True
+
+
+def test_artifact_store_writes_manifest_timeline_and_content(tmp_path):
+    store = ArtifactStore(tmp_path / "artifacts")
+    record = store.write_tool_artifact(
+        conversation_id="conv_test",
+        run_id="run_test",
+        tool_name="web-search",
+        tool_call_id="call_test",
+        kind="sandbox_execution",
+        arguments={"query": "steel energy"},
+        result={"success": True, "data": {"query": "steel energy", "results": [{"title": "A", "url": "https://a"}]}},
+    )
+
+    listed = store.list_artifacts("conv_test")
+    read = store.read_artifact("conv_test", record.artifact_id)
+    context = store.build_context("conv_test")
+
+    assert listed["count"] == 1
+    assert listed["artifacts"][0]["artifact_id"] == record.artifact_id
+    assert read["success"] is True
+    assert "steel energy" in read["content"]
+    assert "Successful Evidence Artifacts" in context
+    assert "Recent Tool Timeline" in context
+    assert (tmp_path / "artifacts" / "conversations" / "conv_test" / "timeline.jsonl").is_file()
+
+
+def test_artifact_store_writes_model_trace(tmp_path):
+    store = ArtifactStore(tmp_path / "artifacts")
+    record = store.write_model_trace(
+        conversation_id="conv_test",
+        run_id="run_test",
+        round_index=0,
+        request={
+            "model": "test-model",
+            "messages": [{"role": "system", "content": "system prompt"}, {"role": "user", "content": "hello"}],
+            "tools": [{"type": "function", "function": {"name": "demo"}}],
+            "tool_choice": "auto",
+        },
+        response={
+            "assistant_message": {"role": "assistant", "content": "hi"},
+            "content": "hi",
+            "tool_calls": [],
+            "reasoning_content_available": True,
+            "reasoning_content_exposed": False,
+            "reasoning_content": "[redacted by AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=false]",
+        },
+    )
+
+    listed = store.list_artifacts("conv_test")
+    read = store.read_artifact("conv_test", record.artifact_id)
+    payload = json.loads(read["content"])
+    context = store.build_context("conv_test")
+
+    assert listed["artifacts"][0]["kind"] == "model_planning"
+    assert listed["artifacts"][0]["tool_name"] == "model_planning"
+    assert "input_messages=2" in listed["artifacts"][0]["summary"]
+    assert payload["request"]["messages"][1]["content"] == "hello"
+    assert payload["response"]["assistant_message"]["content"] == "hi"
+    assert "model_planning" in context
+    assert "No successful evidence artifacts yet." in context
+
+
+def test_artifact_store_marks_nested_skill_failure(tmp_path):
+    store = ArtifactStore(tmp_path / "artifacts")
+    record = store.write_tool_artifact(
+        conversation_id="conv_test",
+        run_id="run_test",
+        tool_name="web-search-quark",
+        tool_call_id="call_test",
+        kind="sandbox_execution",
+        arguments={"query": "steel energy"},
+        result={
+            "success": True,
+            "data": {
+                "success": False,
+                "error_type": "captcha",
+                "error": "Quark returned a CAPTCHA page.",
+                "results": [],
+            },
+        },
+    )
+
+    listed = store.list_artifacts("conv_test")
+    context = store.build_context("conv_test")
+
+    assert listed["artifacts"][0]["artifact_id"] == record.artifact_id
+    assert listed["artifacts"][0]["status"] == "failed"
+    assert "Failed: captcha" in listed["artifacts"][0]["summary"]
+    assert "Failed or Empty Attempts" in context
+
+
+def test_artifact_store_refreshes_legacy_manifest_status(tmp_path):
+    store = ArtifactStore(tmp_path / "artifacts")
+    conversation_root = tmp_path / "artifacts" / "conversations" / "conv_test"
+    artifact_dir = conversation_root / "artifacts"
+    artifact_dir.mkdir(parents=True)
+    artifact_path = artifact_dir / "art_0001_web-search-quark.json"
+    payload = {
+        "artifact_id": "art_0001_web-search-quark",
+        "tool_name": "web-search-quark",
+        "result": {
+            "success": True,
+            "data": {
+                "success": False,
+                "error_type": "captcha",
+                "error": "Quark returned a CAPTCHA page.",
+                "results": [],
+            },
+        },
+        "summary": "0 result(s).",
+    }
+    artifact_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    (conversation_root / "manifest.json").write_text(
+        json.dumps(
+            [
+                {
+                    "artifact_id": "art_0001_web-search-quark",
+                    "tool_name": "web-search-quark",
+                    "relative_path": "artifacts/art_0001_web-search-quark.json",
+                    "summary": "0 result(s).",
+                    "status": "completed",
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (conversation_root / "working_state.md").write_text("legacy", encoding="utf-8")
+
+    listed = store.list_artifacts("conv_test")
+    refreshed_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+    context = store.build_context("conv_test")
+
+    assert listed["artifacts"][0]["status"] == "failed"
+    assert "Failed: captcha" in listed["artifacts"][0]["summary"]
+    assert refreshed_payload["status"] == "failed"
+    assert "Failed or Empty Attempts" in context
+
+
+def test_artifact_store_summarizes_fetch_evidence(tmp_path):
+    store = ArtifactStore(tmp_path / "artifacts")
+    record = store.write_tool_artifact(
+        conversation_id="conv_test",
+        run_id="run_test",
+        tool_name="web-fetch",
+        tool_call_id="call_test",
+        kind="sandbox_execution",
+        arguments={"url": "https://example.com/report"},
+        result={
+            "success": True,
+            "data": {
+                "title": "Steel report",
+                "url": "https://example.com/report",
+                "description": "Industry data",
+                "text": "Energy balance content with useful numbers.",
+            },
+        },
+    )
+
+    listed = store.list_artifacts("conv_test")
+    context = store.build_context("conv_test")
+
+    assert listed["artifacts"][0]["artifact_id"] == record.artifact_id
+    assert listed["artifacts"][0]["status"] == "completed"
+    assert "Steel report" in listed["artifacts"][0]["summary"]
+    assert "https://example.com/report" in listed["artifacts"][0]["summary"]
+    assert "Energy balance content" in listed["artifacts"][0]["summary"]
+    assert "Successful Evidence Artifacts" in context
+
+
+def test_artifact_observation_uses_effective_success_and_page_excerpt():
+    nested_failure = {
+        "success": True,
+        "data": {
+            "success": False,
+            "error_type": "captcha",
+            "error": "Quark returned a CAPTCHA page.",
+            "results": [],
+        },
+    }
+    failed_observation = AgentRuntime._build_artifact_observation(
+        "web-search-quark",
+        nested_failure,
+        {"artifact_id": "art_0001_web-search-quark", "summary": "Failed: captcha"},
+    )
+
+    assert failed_observation["success"] is False
+    assert failed_observation["effective_status"] == "failed"
+    assert failed_observation["wrapper_success"] is True
+    assert failed_observation["data_success"] is False
+    assert "captcha" in failed_observation["error"]
+
+    fetch_observation = AgentRuntime._build_artifact_observation(
+        "web-fetch",
+        {
+            "success": True,
+            "data": {
+                "title": "Steel report",
+                "url": "https://example.com/report",
+                "description": "Industry data",
+                "text": "Energy balance content with useful numbers.",
+            },
+        },
+        {"artifact_id": "art_0002_web-fetch", "summary": "Steel report"},
+    )
+
+    assert fetch_observation["success"] is True
+    assert fetch_observation["title"] == "Steel report"
+    assert fetch_observation["url"] == "https://example.com/report"
+    assert "Energy balance content" in fetch_observation["text_excerpt"]
 
 
 class FakeOpenAI:

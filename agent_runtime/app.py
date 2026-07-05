@@ -75,6 +75,7 @@ async def health() -> dict[str, object]:
         "expose_reasoning_content": settings.expose_reasoning_content,
         "env_file_loaded": settings.env_file_loaded,
         "registry_dir": str(settings.registry_dir),
+        "artifacts_dir": str(settings.artifacts_dir),
         "sandbox_url": settings.sandbox_url,
         "admin_auth_enabled": settings.admin_auth_enabled,
         "agents": len(registry.agents) or 1,

@@ -99,6 +99,7 @@ class AgentRuntimeSettings:
     reasoning_effort: str | None
     expose_reasoning_content: bool
     registry_dir: Path
+    artifacts_dir: Path
     sandbox_url: str
     admin_token: str | None
     max_runtime_rounds: int
@@ -114,11 +115,13 @@ class AgentRuntimeSettings:
     def ensure_directories(self) -> None:
         (self.registry_dir / "skills").mkdir(parents=True, exist_ok=True)
         (self.registry_dir / "agents").mkdir(parents=True, exist_ok=True)
+        self.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
 
 def load_settings() -> AgentRuntimeSettings:
     dotenv = load_dotenv()
     registry_dir = Path(env("AGENT_RUNTIME_REGISTRY_DIR", "./registry")).resolve()
+    artifacts_dir = Path(env("AGENT_RUNTIME_ARTIFACTS_DIR", "./artifacts")).resolve()
     settings = AgentRuntimeSettings(
         host=env("AGENT_RUNTIME_HOST", "0.0.0.0"),
         port=int(env("AGENT_RUNTIME_PORT", "8010")),
@@ -128,6 +131,7 @@ def load_settings() -> AgentRuntimeSettings:
         reasoning_effort=optional_env("AGENT_RUNTIME_REASONING_EFFORT"),
         expose_reasoning_content=bool_env("AGENT_RUNTIME_EXPOSE_REASONING_CONTENT", False),
         registry_dir=registry_dir,
+        artifacts_dir=artifacts_dir,
         sandbox_url=env("AGENT_RUNTIME_SANDBOX_URL", "http://127.0.0.1:8001"),
         admin_token=os.getenv("AGENT_RUNTIME_ADMIN_TOKEN") or None,
         max_runtime_rounds=int(env("AGENT_RUNTIME_MAX_RUNTIME_ROUNDS", "6")),

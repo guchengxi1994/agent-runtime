@@ -8,11 +8,13 @@ services:
     environment:
       AGENT_RUNTIME_SANDBOX_URL: http://sandbox:8001
       AGENT_RUNTIME_REGISTRY_DIR: /app/registry
+      AGENT_RUNTIME_ARTIFACTS_DIR: /app/artifacts
     ports:
       - "8010:8010"
     volumes:
       - ./agent_runtime:/app/agent_runtime
       - ./registry:/app/registry
+      - ./artifacts:/app/artifacts
     depends_on:
       - sandbox
 

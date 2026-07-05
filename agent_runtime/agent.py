@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable
 
 from openai import AsyncOpenAI
 
+from .artifacts import ArtifactStore, effective_success, result_error_message
 from .config import AgentRuntimeSettings
 from .models import (
     AgentDefinition,
@@ -33,6 +34,7 @@ If a harness skill may be relevant, call `activate_skill` to load the complete S
 After a skill is activated, follow its harness document. Let the harness guide whether executable skills are needed and in what order.
 If required user input is missing, call `request_user_input` instead of guessing.
 At the start of each turn, infer from the full conversation whether the latest user intent is to continue, revise, or restart prior work. Do not rely on literal keyword matching. If the user intent is to continue a prior workflow after a round limit, tool failure, or partial progress, reuse existing tool observations and avoid repeating successful tool calls unless their results were empty, failed, stale, or insufficient. Prefer targeted next actions or synthesis over restarting from scratch.
+When tool results are mixed, distinguish failed or empty attempts from successful usable observations. Do not say a whole tool category failed if another attempt or stored artifact succeeded; cite artifact ids or call `read_artifact` when using stored evidence.
 When calling `request_user_input`, make the user-facing request self-contained:
 - Ask only for information that blocks the next planning or execution step.
 - Prefer 1-3 fields; every field must have name, label, type, required, and description.
@@ -146,6 +148,47 @@ REQUEST_USER_INPUT_TOOL = {
         },
     },
 }
+LIST_ARTIFACTS_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "list_artifacts",
+        "description": "List stored artifacts and compact tool observations for the current conversation.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of recent artifacts to return.",
+                    "default": 50,
+                }
+            },
+            "additionalProperties": False,
+        },
+    },
+}
+READ_ARTIFACT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "read_artifact",
+        "description": "Read a stored artifact by artifact_id when full tool output is needed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {
+                    "type": "string",
+                    "description": "Artifact id from list_artifacts or an observation artifact reference.",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return.",
+                    "default": 12000,
+                },
+            },
+            "required": ["artifact_id"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 
 class AgentRequestError(ValueError):
@@ -179,6 +222,7 @@ class AgentRuntime:
         )
         self.openai = AsyncOpenAI(**openai_kwargs)
         self.runner = SandboxClient(settings.sandbox_url, settings.request_timeout_seconds)
+        self.artifacts = ArtifactStore(settings.artifacts_dir)
         self.conversations: dict[str, ConversationState] = {}
         self.executions: list[dict[str, Any]] = []
 
@@ -202,6 +246,22 @@ class AgentRuntime:
         messages = [
             {"role": "system", "content": self._build_system_prompt(agent, available_skills, activated_skills)}
         ]
+        artifact_context_index: int | None = None
+
+        def refresh_artifact_context() -> None:
+            nonlocal artifact_context_index
+            artifact_context = self.artifacts.build_context(conversation.id)
+            if not artifact_context:
+                return
+            artifact_message = {"role": "system", "content": artifact_context}
+            if artifact_context_index is None:
+                insert_at = 1
+                messages.insert(insert_at, artifact_message)
+                artifact_context_index = insert_at
+                return
+            messages[artifact_context_index] = artifact_message
+
+        refresh_artifact_context()
         if pending_input_request:
             messages.append({"role": "system", "content": self._build_pending_input_prompt(pending_input_request)})
         messages.extend(conversation.messages)
@@ -235,6 +295,7 @@ class AgentRuntime:
                     "tool_candidates": [tool["function"]["name"] for tool in runtime_tools],
                 },
             )
+            model_request = self._json_snapshot(openai_kwargs)
             model_turn = await self._complete_model_turn(
                 openai_kwargs,
                 on_delta=on_delta,
@@ -243,6 +304,14 @@ class AgentRuntime:
             )
             assistant_message = model_turn["assistant_message"]
             reasoning_text = model_turn["reasoning_text"]
+            self.artifacts.write_model_trace(
+                conversation_id=conversation.id,
+                run_id=run_id,
+                round_index=round_index,
+                request=model_request,
+                response=self._build_model_trace_response(model_turn, reasoning_text),
+            )
+            refresh_artifact_context()
             messages.append(assistant_message)
             conversation.messages.append(assistant_message)
 
@@ -300,6 +369,24 @@ class AgentRuntime:
                     self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "read_skill_resource":
                     result = self._read_skill_resource(args, activated_skills)
+                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
+                elif tool_name == "list_artifacts":
+                    limit = self._coerce_int(args.get("limit"), 50)
+                    result = self.artifacts.list_artifacts(
+                        conversation.id,
+                        limit,
+                    )
+                    self._log_artifact_list(run_id, conversation.id, tool_call_id, limit, result)
+                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
+                elif tool_name == "read_artifact":
+                    artifact_id = str(args.get("artifact_id") or "")
+                    max_chars = self._coerce_int(args.get("max_chars"), 12000)
+                    result = self.artifacts.read_artifact(
+                        conversation.id,
+                        artifact_id,
+                        max_chars,
+                    )
+                    self._log_artifact_read(run_id, conversation.id, tool_call_id, artifact_id, max_chars, result)
                     self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "request_user_input":
                     question = str(args.get("question", "")).strip() or "请补充继续执行所需的信息。"
@@ -420,10 +507,24 @@ class AgentRuntime:
                         execution_id=execution_id,
                     )
                 )
+                observation_result = result
+                if tool_name not in {"list_artifacts", "read_artifact"}:
+                    artifact = self.artifacts.write_tool_artifact(
+                        conversation_id=conversation.id,
+                        run_id=run_id,
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        kind="runtime_call" if tool_name in {"activate_skill", "read_skill_resource"} else "sandbox_execution",
+                        arguments=args,
+                        result=result,
+                        execution_id=execution_id,
+                    )
+                    observation_result = self._build_artifact_observation(tool_name, result, artifact.observation())
+                    refresh_artifact_context()
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": json.dumps(result, ensure_ascii=False),
+                    "content": json.dumps(observation_result, ensure_ascii=False),
                 }
                 messages.append(tool_message)
                 conversation.messages.append(tool_message)
@@ -622,6 +723,30 @@ class AgentRuntime:
         return {}
 
     @staticmethod
+    def _json_snapshot(value: Any) -> Any:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+
+    def _build_model_trace_response(
+        self,
+        model_turn: dict[str, Any],
+        reasoning_text: str | None,
+    ) -> dict[str, Any]:
+        response = {
+            "assistant_message": self._json_snapshot(model_turn.get("assistant_message") or {}),
+            "content": str(model_turn.get("content") or ""),
+            "tool_calls": self._json_snapshot(model_turn.get("tool_calls") or []),
+            "reasoning_content_available": bool(reasoning_text),
+            "reasoning_content_exposed": bool(reasoning_text and self.settings.expose_reasoning_content),
+        }
+        if reasoning_text:
+            response["reasoning_content"] = (
+                reasoning_text
+                if self.settings.expose_reasoning_content
+                else "[redacted by AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=false]"
+            )
+        return response
+
+    @staticmethod
     def _extract_delta_string(delta: Any, delta_payload: dict[str, Any], key: str) -> str:
         value = delta_payload.get(key)
         if not isinstance(value, str):
@@ -810,7 +935,12 @@ class AgentRuntime:
         return "\n\n".join(parts)
 
     def _runtime_tools(self, executable_skills: list[SkillDefinition], include_skill_activation: bool) -> list[dict[str, Any]]:
-        result = [REQUEST_USER_INPUT_TOOL, *[skill.to_openai_tool() for skill in executable_skills]]
+        result = [
+            REQUEST_USER_INPUT_TOOL,
+            LIST_ARTIFACTS_TOOL,
+            READ_ARTIFACT_TOOL,
+            *[skill.to_openai_tool() for skill in executable_skills],
+        ]
         if include_skill_activation:
             result.insert(0, ACTIVATE_SKILL_TOOL)
             result.insert(1, READ_SKILL_RESOURCE_TOOL)
@@ -871,6 +1001,69 @@ class AgentRuntime:
         return parsed if isinstance(parsed, dict) else {"value": parsed}
 
     @staticmethod
+    def _build_artifact_observation(
+        tool_name: str,
+        result: dict[str, Any],
+        artifact_observation: dict[str, Any],
+    ) -> dict[str, Any]:
+        success = effective_success(result) if isinstance(result, dict) else None
+        error = result_error_message(result) if isinstance(result, dict) else ""
+        observation = {
+            "tool_name": tool_name,
+            "success": success,
+            "effective_status": "failed" if success is False else "completed",
+            "wrapper_success": result.get("success") if isinstance(result, dict) else None,
+            "phase": result.get("phase") if isinstance(result, dict) else None,
+            "error": error or None,
+            "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
+            "artifact": artifact_observation,
+        }
+        data = result.get("data") if isinstance(result, dict) else None
+        if isinstance(data, dict):
+            observation["data_keys"] = sorted(data.keys())
+            if isinstance(data.get("success"), bool):
+                observation["data_success"] = data.get("success")
+            if data.get("error_type"):
+                observation["error_type"] = data.get("error_type")
+            if isinstance(data.get("results"), list):
+                observation["result_count"] = len(data["results"])
+                observation["result_preview"] = [
+                    {
+                        "title": item.get("title"),
+                        "url": item.get("url"),
+                        "snippet": item.get("snippet"),
+                    }
+                    for item in data["results"][:3]
+                    if isinstance(item, dict)
+                ]
+            if data.get("query"):
+                observation["query"] = data.get("query")
+            if data.get("title"):
+                observation["title"] = data.get("title")
+            if data.get("url"):
+                observation["url"] = data.get("url")
+            if data.get("description"):
+                observation["description"] = data.get("description")
+            text = data.get("text") or data.get("markdown") or data.get("content")
+            if isinstance(text, str) and text.strip():
+                observation["text_excerpt"] = AgentRuntime._compact_text(text, 700)
+        return {key: value for key, value in observation.items() if value is not None}
+
+    @staticmethod
+    def _compact_text(value: str, limit: int) -> str:
+        compact = " ".join(value.split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 3] + "..."
+
+    @staticmethod
+    def _coerce_int(value: Any, fallback: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return fallback
+
+    @staticmethod
     def _parse_requested_fields(raw: Any) -> list[Any]:
         from .models import RequestedInputField
 
@@ -924,17 +1117,19 @@ class AgentRuntime:
         *,
         execution_id: str | None = None,
     ) -> None:
-        success = result.get("success") if isinstance(result, dict) else None
+        success = effective_success(result) if isinstance(result, dict) else None
+        detail = result_error_message(result) if isinstance(result, dict) else ""
         self._record_step(
             steps,
             on_step,
             kind=kind,
             label=label,
             status="completed" if success is not False else "failed",
-            detail=str(result.get("error") or result.get("phase") or ""),
+            detail=str(detail or result.get("phase") or ""),
             metadata={
                 "run_id": run_id,
                 "success": success,
+                "wrapper_success": result.get("success") if isinstance(result, dict) else None,
                 "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
             },
             tool_call_id=tool_call_id,
@@ -949,8 +1144,49 @@ class AgentRuntime:
                 success,
                 execution_id,
                 tool_call_id,
-                str(result.get("error") or result.get("phase") or ""),
+                str(detail or result.get("phase") or ""),
             )
+
+    @staticmethod
+    def _log_artifact_list(
+        run_id: str,
+        conversation_id: str,
+        tool_call_id: str,
+        limit: int,
+        result: dict[str, Any],
+    ) -> None:
+        logger.info(
+            "ARTIFACT_LIST run_id=%s conversation_id=%s status=%s count=%s returned=%s limit=%s tool_call_id=%s",
+            run_id,
+            conversation_id,
+            "completed" if result.get("success") is not False else "failed",
+            result.get("count"),
+            len(result.get("artifacts") or []) if isinstance(result.get("artifacts"), list) else 0,
+            limit,
+            tool_call_id,
+        )
+
+    @staticmethod
+    def _log_artifact_read(
+        run_id: str,
+        conversation_id: str,
+        tool_call_id: str,
+        artifact_id: str,
+        max_chars: int,
+        result: dict[str, Any],
+    ) -> None:
+        logger.info(
+            "ARTIFACT_READ run_id=%s conversation_id=%s artifact_id=%s status=%s truncated=%s total_chars=%s max_chars=%s summary=%s tool_call_id=%s",
+            run_id,
+            conversation_id,
+            artifact_id,
+            "completed" if result.get("success") is not False else "failed",
+            result.get("truncated"),
+            result.get("total_chars"),
+            max_chars,
+            str(result.get("summary") or result.get("error") or "")[:300],
+            tool_call_id,
+        )
 
     def _record_step(
         self,
