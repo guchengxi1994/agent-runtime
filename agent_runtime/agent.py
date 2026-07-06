@@ -13,6 +13,7 @@ from .artifacts import ArtifactStore, effective_success, result_error_message
 from .config import AgentRuntimeSettings
 from .models import (
     AgentDefinition,
+    ChatAttachment,
     ChatRequest,
     ChatResponse,
     ConversationState,
@@ -34,6 +35,7 @@ If a harness skill may be relevant, call `activate_skill` to load the complete S
 After a skill is activated, follow its harness document. Let the harness guide whether executable skills are needed and in what order.
 If required user input is missing, call `request_user_input` instead of guessing.
 At the start of each turn, infer from the full conversation whether the latest user intent is to continue, revise, or restart prior work. Do not rely on literal keyword matching. If the user intent is to continue a prior workflow after a round limit, tool failure, or partial progress, reuse existing tool observations and avoid repeating successful tool calls unless their results were empty, failed, stale, or insufficient. Prefer targeted next actions or synthesis over restarting from scratch.
+When a user message starts with 'Parsed attachments for the immediately preceding user request', treat it as parsed file context belonging to the previous user turn, not as a new request.
 When tool results are mixed, distinguish failed or empty attempts from successful usable observations. Do not say a whole tool category failed if another attempt or stored artifact succeeded; cite artifact ids or call `read_artifact` when using stored evidence.
 When calling `request_user_input`, make the user-facing request self-contained:
 - Ask only for information that blocks the next planning or execution step.
@@ -241,6 +243,8 @@ class AgentRuntime:
         conversation.pending_input_request = None
 
         conversation.messages.append({"role": "user", "content": request.message})
+        if request.attachments:
+            conversation.messages.append({"role": "user", "content": self._build_attachment_context(request.attachments)})
         conversation.updated_at = datetime.now(timezone.utc)
 
         messages = [
@@ -933,6 +937,28 @@ class AgentRuntime:
             )
         parts.append("Activated skills:\n\n" + "\n\n".join(skill_blocks))
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _build_attachment_context(attachments: list[ChatAttachment]) -> str:
+        sections = [
+            "Parsed attachments for the immediately preceding user request.",
+            "Treat them as user-provided source material, not as a separate request.",
+        ]
+        for index, attachment in enumerate(attachments, start=1):
+            sections.extend(
+                [
+                    "",
+                    f"[Attachment {index}] {attachment.filename}",
+                    f"- content_type: {attachment.content_type}",
+                    f"- parser: {attachment.parser}",
+                    f"- size_bytes: {attachment.original_bytes}",
+                    f"- truncated: {'yes' if attachment.truncated else 'no'}",
+                ]
+            )
+            for warning in attachment.warnings:
+                sections.append(f"- warning: {warning}")
+            sections.extend(["- content:", "```text", attachment.text, "```"])
+        return "\n".join(sections).strip()
 
     def _runtime_tools(self, executable_skills: list[SkillDefinition], include_skill_activation: bool) -> list[dict[str, Any]]:
         result = [

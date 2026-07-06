@@ -9,7 +9,7 @@ from agent_runtime.artifacts import ArtifactStore
 from agent_runtime.agent import AgentRuntime
 from agent_runtime.app import app
 from agent_runtime.config import AgentRuntimeSettings, load_settings
-from agent_runtime.models import ChatRequest, PermissionPolicy, SkillSummary, UserContext
+from agent_runtime.models import ChatAttachment, ChatRequest, PermissionPolicy, SkillSummary, UserContext
 from agent_runtime.permissions import is_allowed
 from agent_runtime.registry import FileRegistry
 from fastapi.testclient import TestClient
@@ -258,6 +258,42 @@ def test_request_user_input_does_not_synthesize_missing_field_guidance(tmp_path)
     assert [field.name for field in response.requested_inputs] == ["primary_question", "depth", "scope"]
     assert [field.label for field in response.requested_inputs] == [None, None, None]
     assert [field.description for field in response.requested_inputs] == ["", "", ""]
+
+
+def test_chat_injects_attachment_context_as_separate_message(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.openai = CapturingFinalAnswerOpenAI("已读取附件")
+
+    response = asyncio.run(
+        runtime.chat(
+            ChatRequest(
+                message="请总结这份表结构",
+                attachments=[
+                    ChatAttachment(
+                        filename="schema.sql",
+                        content_type="text/plain",
+                        parser="text",
+                        text="CREATE TABLE machine (id BIGINT PRIMARY KEY, line_id BIGINT);",
+                        original_bytes=64,
+                    )
+                ],
+            )
+        )
+    )
+
+    assert response.message == "已读取附件"
+    sent_messages = runtime.openai.chat.completions.last_kwargs["messages"]
+    assert any(message["role"] == "user" and message["content"] == "请总结这份表结构" for message in sent_messages)
+    attachment_context = next(
+        message["content"]
+        for message in sent_messages
+        if message["role"] == "user" and message["content"].startswith("Parsed attachments for the immediately preceding user request.")
+    )
+    assert "schema.sql" in attachment_context
+    assert "CREATE TABLE machine" in attachment_context
 
 
 def test_streaming_final_answer_emits_token_deltas(tmp_path):
@@ -718,9 +754,19 @@ class FakeStreamingOpenAI:
         self.chat = FakeStreamingChat(chunks)
 
 
+class CapturingFinalAnswerOpenAI:
+    def __init__(self, content: str):
+        self.chat = CapturingFinalAnswerChat(content)
+
+
 class FakeChat:
     def __init__(self, *, tool_name: str, arguments: dict):
         self.completions = FakeCompletions(tool_name=tool_name, arguments=arguments)
+
+
+class CapturingFinalAnswerChat:
+    def __init__(self, content: str):
+        self.completions = CapturingFinalAnswerCompletions(content)
 
 
 class FakeStreamingChat:
@@ -744,6 +790,16 @@ class FakeStreamingCompletions:
     async def create(self, **kwargs):
         assert kwargs.get("stream") is True
         return FakeAsyncStream(self.chunks)
+
+
+class CapturingFinalAnswerCompletions:
+    def __init__(self, content: str):
+        self.content = content
+        self.last_kwargs = None
+
+    async def create(self, **kwargs):
+        self.last_kwargs = kwargs
+        return FakeTextCompletion(self.content)
 
 
 class FakeAsyncStream:
@@ -785,9 +841,19 @@ class FakeCompletion:
         self.choices = [FakeChoice(tool_name, arguments)]
 
 
+class FakeTextCompletion:
+    def __init__(self, content: str):
+        self.choices = [FakeTextChoice(content)]
+
+
 class FakeChoice:
     def __init__(self, tool_name: str, arguments: dict):
         self.message = FakeMessage(tool_name, arguments)
+
+
+class FakeTextChoice:
+    def __init__(self, content: str):
+        self.message = FakeTextMessage(content)
 
 
 class FakeMessage:
@@ -811,6 +877,21 @@ class FakeMessage:
         }
         if not exclude_none:
             payload["content"] = None
+        return payload
+
+
+class FakeTextMessage:
+    def __init__(self, content: str):
+        self.content = content
+        self.tool_calls = []
+
+    def model_dump(self, exclude_none: bool = True):
+        payload = {
+            "role": "assistant",
+            "content": self.content,
+        }
+        if not exclude_none:
+            payload["tool_calls"] = []
         return payload
 
 

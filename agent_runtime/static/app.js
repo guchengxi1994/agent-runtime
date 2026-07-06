@@ -219,7 +219,20 @@ async function fetchJson(url, options = {}) {
   return data;
 }
 
-function addMessage(role, text, steps = [], requestedInputs = [], liveStream = null) {
+function renderUploadedFiles(files) {
+  if (!files || !files.length) {
+    return "";
+  }
+  const rows = files
+    .map((file) => {
+      const sizeKb = Math.max(1, Math.round((file.size || 0) / 1024));
+      return `<div class="uploaded-file"><strong>${escapeText(file.name || "unnamed")}</strong><small>${sizeKb} KB</small></div>`;
+    })
+    .join("");
+  return `<section class="uploaded-files" aria-label="已上传文件"><div class="uploaded-files-title">附件</div>${rows}</section>`;
+}
+
+function addMessage(role, text, steps = [], requestedInputs = [], liveStream = null, uploadedFiles = []) {
   const messages = $("messages");
   const item = document.createElement("div");
   item.className = `message ${role}`;
@@ -228,6 +241,7 @@ function addMessage(role, text, steps = [], requestedInputs = [], liveStream = n
     <div class="avatar">${avatar}</div>
     <div class="message-body">
       <div class="bubble markdown-body">${renderMarkdown(text)}</div>
+      ${role === "user" && uploadedFiles.length ? renderUploadedFiles(uploadedFiles) : ""}
       ${role === "assistant" && liveStream ? renderLiveStream(liveStream) : ""}
       ${role === "assistant" && requestedInputs.length ? renderRequestedInputs(requestedInputs) : ""}
       ${role === "assistant" && steps.length ? renderRunLog(steps) : ""}
@@ -378,25 +392,48 @@ function renderRunLog(steps) {
   `;
 }
 
-function buildRequest(message) {
-  const body = { message };
+function buildRequest(message, uploadedFiles = []) {
+  const body = new FormData();
+  body.append("message", message);
   if (state.conversationId) {
-    body.conversation_id = state.conversationId;
+    body.append("conversation_id", state.conversationId);
+  }
+  for (const file of uploadedFiles) {
+    body.append("files", file);
   }
   return body;
+}
+
+function syncSelectedFiles() {
+  const list = $("selectedFiles");
+  const files = Array.from($("fileInput").files || []);
+  if (!files.length) {
+    list.innerHTML = "";
+    return;
+  }
+  list.innerHTML = files
+    .map((file) => {
+      const sizeKb = Math.max(1, Math.round((file.size || 0) / 1024));
+      return `<span class="selected-file">${escapeText(file.name)} · ${sizeKb} KB</span>`;
+    })
+    .join("");
 }
 
 async function sendMessage(event) {
   event.preventDefault();
   const input = $("messageInput");
+  const fileInput = $("fileInput");
   const button = $("sendButton");
   const message = input.value.trim();
-  if (!message) {
+  const selectedFiles = Array.from(fileInput.files || []);
+  if (!message && !selectedFiles.length) {
     return;
   }
 
   input.value = "";
-  addMessage("user", message);
+  fileInput.value = "";
+  syncSelectedFiles();
+  addMessage("user", message || "已上传文件，请处理。", [], [], null, selectedFiles);
   const assistantItem = addMessage("assistant", "运行中...");
   const streamedSteps = [];
   const liveStream = createLiveStreamState();
@@ -417,8 +454,7 @@ async function sendMessage(event) {
   try {
     const response = await fetch("/chat/stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(buildRequest(message)),
+      body: buildRequest(message, selectedFiles),
     });
     if (!response.ok || !response.body) {
       const text = await response.text();
@@ -535,6 +571,7 @@ function resetConversation() {
 function init() {
   $("chatForm").addEventListener("submit", sendMessage);
   $("resetConversation").addEventListener("click", resetConversation);
+  $("fileInput").addEventListener("change", syncSelectedFiles);
   $("messageInput").addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       $("chatForm").requestSubmit();

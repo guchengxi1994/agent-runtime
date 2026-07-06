@@ -117,11 +117,22 @@ class SkillSummary(BaseModel):
     resources: list[SkillResource] = Field(default_factory=list)
 
 
+class ChatAttachment(BaseModel):
+    filename: str
+    content_type: str = "application/octet-stream"
+    parser: str
+    text: str
+    original_bytes: int = 0
+    truncated: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ChatRequest(BaseModel):
     message: str
     agent_id: str = "default"
     conversation_id: str | None = None
     skill_ids: list[str] | None = None
+    attachments: list[ChatAttachment] = Field(default_factory=list)
     user: UserContext = Field(default_factory=UserContext)
     metadata: dict[str, Any] = Field(default_factory=dict)
 

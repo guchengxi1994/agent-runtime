@@ -5,14 +5,22 @@ import asyncio
 import json
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .agent import AgentRequestError, AgentRuntime
 from .config import load_settings
+from .file_ingest import (
+    FileIngestError,
+    parse_form_json_field,
+    parse_form_skill_ids,
+    parse_uploaded_files,
+)
 from .logging_utils import setup_logging
 from .models import AgentDefinition, ChatRequest, ChatResponse, SkillPackage, UserContext
 from .models import RuntimeStepTrace
@@ -128,8 +136,47 @@ async def list_executions() -> dict[str, object]:
     return {"executions": runtime.executions[-100:]}
 
 
+async def build_chat_request(http_request: Request) -> ChatRequest:
+    content_type = (http_request.headers.get("content-type") or "").lower()
+    try:
+        if content_type.startswith("application/json"):
+            payload = await http_request.json()
+            return ChatRequest.model_validate(payload)
+
+        if content_type.startswith("multipart/form-data") or content_type.startswith("application/x-www-form-urlencoded"):
+            form = await http_request.form()
+            files: list[StarletteUploadFile] = [
+                value
+                for _, value in form.multi_items()
+                if isinstance(value, StarletteUploadFile)
+            ]
+            attachments = await parse_uploaded_files(files)
+            metadata = parse_form_json_field(form.get("metadata"), field_name="metadata", expected_type=dict)
+            skill_ids = parse_form_skill_ids(form.getlist("skill_ids"), form.get("skill_ids"))
+            user = parse_form_json_field(form.get("user"), field_name="user", expected_type=dict)
+            message = str(form.get("message") or "").strip()
+            if not message and attachments:
+                message = "Please read the uploaded files and continue with the task."
+            return ChatRequest.model_validate(
+                {
+                    "message": message,
+                    "agent_id": str(form.get("agent_id") or "default"),
+                    "conversation_id": str(form.get("conversation_id") or "").strip() or None,
+                    "skill_ids": skill_ids,
+                    "attachments": [attachment.model_dump() for attachment in attachments],
+                    "user": user,
+                    "metadata": metadata,
+                }
+            )
+    except (ValidationError, FileIngestError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    raise HTTPException(status_code=415, detail="Unsupported content type. Use application/json or multipart/form-data.")
+
+
 @app.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest) -> ChatResponse:
+async def chat(http_request: Request) -> ChatResponse:
+    request = await build_chat_request(http_request)
     try:
         return await runtime.chat(request)
     except AgentRequestError as exc:
@@ -137,7 +184,9 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
 
 @app.post("/chat/stream")
-async def chat_stream(request: ChatRequest) -> StreamingResponse:
+async def chat_stream(http_request: Request) -> StreamingResponse:
+    request = await build_chat_request(http_request)
+
     async def event_stream():
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
 
