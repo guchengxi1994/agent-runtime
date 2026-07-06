@@ -1,0 +1,41 @@
+{
+  "id": "industrial_ontology_designer",
+  "name": "Industrial Ontology Designer",
+  "description": "Design, validate, and evolve industrial ontologies across discovery, normalization, mapping, behavior modeling, knowledge linking, and governed release.",
+  "enabled": true,
+  "skill_ids": [
+    "industrial-ontology-engineering",
+    "ontology-marketplace",
+    "ontology-template-marketplace",
+    "ontology-discovery",
+    "ontology-extraction",
+    "ontology-relation-discovery",
+    "ontology-normalization",
+    "ontology-mapping",
+    "ontology-behavior-discovery",
+    "ontology-knowledge-linking",
+    "ontology-validation",
+    "ontology-structure-validator",
+    "ontology-publish",
+    "ontology-evolution",
+    "ai-ontology-designer",
+    "web-search",
+    "web-search-quark",
+    "web-fetch",
+    "calculator"
+  ],
+  "capability_hints": [
+    "industrial ontology engineering",
+    "ontology pipeline governance",
+    "industrial template bootstrap",
+    "mapping and validation"
+  ],
+  "metadata": {
+    "positioning": "Industrial Ontology Engineering Platform",
+    "lifecycle": [
+      "construction",
+      "runtime",
+      "continuous-evolution"
+    ]
+  }
+}

@@ -1,0 +1,116 @@
+openapi: 3.0.3
+info:
+  title: Device Operations API
+  version: 1.0.0
+paths:
+  /api/v1/machines/{machineId}/status:
+    get:
+      summary: Get current machine status
+      parameters:
+        - name: machineId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Current machine status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  machineId:
+                    type: string
+                  status:
+                    type: string
+                    enum: [offline, idle, running, alarm, maintenance]
+                  temperature:
+                    type: number
+                  speedRpm:
+                    type: number
+                  activeAlarmCount:
+                    type: integer
+  /api/v1/machines/{machineId}/start:
+    post:
+      summary: Start a machine
+      parameters:
+        - name: machineId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Start command accepted
+  /api/v1/machines/{machineId}/stop:
+    post:
+      summary: Stop a machine
+      parameters:
+        - name: machineId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Stop command accepted
+  /api/v1/machines/{machineId}/reset:
+    post:
+      summary: Reset a machine alarm state
+      parameters:
+        - name: machineId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "202":
+          description: Reset command accepted
+  /api/v1/work-orders:
+    post:
+      summary: Create production work order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [machineId, productCode, plannedQuantity]
+              properties:
+                machineId:
+                  type: string
+                productCode:
+                  type: string
+                plannedQuantity:
+                  type: number
+                plannedStartTime:
+                  type: string
+                  format: date-time
+      responses:
+        "201":
+          description: Work order created
+  /api/v1/alarms/{alarmId}/acknowledge:
+    post:
+      summary: Acknowledge an alarm
+      parameters:
+        - name: alarmId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [operatorName]
+              properties:
+                operatorName:
+                  type: string
+                note:
+                  type: string
+      responses:
+        "200":
+          description: Alarm acknowledged

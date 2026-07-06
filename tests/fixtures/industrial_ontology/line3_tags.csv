@@ -1,0 +1,11 @@
+tag_name,protocol,address,unit,access,description
+Line3.MachineA.Status,plc,DB100.DBW0,,read,Machine A status code
+Line3.MachineA.Temp,plc,DB100.DBD2,celsius,read,Machine A spindle temperature
+Line3.MachineA.Speed,plc,DB100.DBD6,rpm,read,Machine A spindle speed
+Line3.MachineA.StartCmd,plc,DB100.DBX12.0,,write,Start command bit for Machine A
+Line3.MachineA.StopCmd,plc,DB100.DBX12.1,,write,Stop command bit for Machine A
+Line3.MachineA.ResetCmd,plc,DB100.DBX12.2,,write,Reset alarm bit for Machine A
+factory/line3/machineA/alarm,mqtt,factory/line3/machineA/alarm,,read,Alarm topic for Machine A
+factory/line3/machineA/power,mqtt,factory/line3/machineA/power,kw,read,Instant power topic for Machine A
+ns=2;s=Line3.MachineA.Vibration,opcua,ns=2;s=Line3.MachineA.Vibration,mm/s,read,Machine A vibration value
+ns=2;s=Line3.MachineA.Mode,opcua,ns=2;s=Line3.MachineA.Mode,,read,Machine A run mode

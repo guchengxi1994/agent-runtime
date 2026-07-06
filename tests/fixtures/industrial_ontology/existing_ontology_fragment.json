@@ -1,0 +1,48 @@
+{
+  "objects": [
+    {
+      "name": "ProductionLine",
+      "aliases": ["Line"],
+      "properties": [
+        {"name": "id", "type": "string"},
+        {"name": "lineCode", "type": "string"},
+        {"name": "status", "type": "enum", "enum_values": ["offline", "idle", "running", "alarm"]}
+      ]
+    },
+    {
+      "name": "Machine",
+      "aliases": ["Device", "Equipment"],
+      "properties": [
+        {"name": "id", "type": "string"},
+        {"name": "name", "type": "string"},
+        {"name": "status", "type": "enum", "enum_values": ["offline", "idle", "running", "alarm", "maintenance"]},
+        {"name": "temperature", "type": "number", "unit": "celsius"},
+        {"name": "speed", "type": "number", "unit": "rpm"}
+      ],
+      "behaviors": [
+        {"name": "start"},
+        {"name": "stop"},
+        {"name": "reset"}
+      ]
+    },
+    {
+      "name": "Alarm",
+      "properties": [
+        {"name": "alarmCode", "type": "string"},
+        {"name": "severity", "type": "enum", "enum_values": ["info", "warning", "major", "critical"]},
+        {"name": "status", "type": "enum", "enum_values": ["active", "acknowledged", "cleared"]}
+      ],
+      "behaviors": [
+        {"name": "acknowledge"}
+      ]
+    }
+  ],
+  "relations": [
+    {"source": "ProductionLine", "predicate": "contains", "target": "Machine"},
+    {"source": "Alarm", "predicate": "generatedBy", "target": "Machine"}
+  ],
+  "mappings": [
+    {"object": "Machine", "property": "temperature", "source_kind": "plc", "source_path": "DB100.DBD2"},
+    {"object": "Machine", "property": "speed", "source_kind": "opcua", "source_path": "ns=2;s=Line3.MachineA.Speed"}
+  ]
+}

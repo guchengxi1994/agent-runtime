@@ -349,6 +349,26 @@ def test_builtin_research_skills_are_registered():
     assert "steel-industry energy control" in registry.skills["steel-energy-control"].description
 
 
+def test_industrial_ontology_skills_and_agent_are_registered():
+    registry = FileRegistry(Path("registry").resolve())
+    registry.reload()
+
+    assert "industrial-ontology-engineering" in registry.skills
+    assert registry.skills["industrial-ontology-engineering"].executable is False
+    assert "ontology-marketplace" in registry.skills
+    assert "ontology-template-marketplace" in registry.skills
+    assert registry.skills["ontology-template-marketplace"].executable is True
+    assert "ontology-structure-validator" in registry.skills
+    assert registry.skills["ontology-structure-validator"].executable is True
+    assert registry.skills["ontology-template-marketplace"].execution_policy["packages"] == []
+    assert registry.skills["ontology-structure-validator"].execution_policy["packages"] == []
+
+    agent = registry.get_agent("industrial_ontology_designer")
+    assert "industrial-ontology-engineering" in set(agent.skill_ids or [])
+    assert "ontology-template-marketplace" in set(agent.skill_ids or [])
+    assert "ontology-structure-validator" in set(agent.skill_ids or [])
+
+
 def test_steel_energy_skills_execute_representative_cases():
     process_map = load_skill_module(Path("registry/skills/steel-process-map/skill.py"))
     energy_balance = load_skill_module(Path("registry/skills/steel-energy-balance/skill.py"))
@@ -393,6 +413,52 @@ def test_steel_energy_skills_execute_representative_cases():
     )
     assert ranked["ranked_measures"][0]["annual_energy_saving_gj"] > 0
     assert ranked["quick_wins"]
+
+
+def test_industrial_ontology_executables_handle_representative_cases():
+    template_marketplace = load_skill_module(Path("registry/skills/ontology-template-marketplace/skill.py"))
+    structure_validator = load_skill_module(Path("registry/skills/ontology-structure-validator/skill.py"))
+
+    template = template_marketplace.execute(
+        {
+            "industry": "battery",
+            "scope": "line",
+            "include_behaviors": True,
+            "include_mappings": False,
+        }
+    )
+    assert template["matched_template"] == "battery"
+    assert "Cell" in [item["name"] for item in template["objects"]]
+    assert template["mapping_targets"] == []
+    assert "Machine" in template["focus_objects"]
+
+    validation = structure_validator.execute(
+        {
+            "ontology": {
+                "objects": [
+                    {
+                        "name": "Machine",
+                        "aliases": ["Device"],
+                        "properties": [
+                            {"name": "temperature", "type": "number"},
+                            {"name": "temperature", "type": "number"},
+                        ],
+                        "behaviors": [{"name": "start"}, {"name": "start"}],
+                    },
+                    {
+                        "name": "Alarm",
+                        "properties": [{"name": "status", "type": "enum", "enum_values": ["Running", "Idle"]}],
+                    },
+                ],
+                "relations": [{"source": "Alarm", "predicate": "generatedBy", "target": "Machine"}],
+                "mappings": [{"object": "Machine", "property": "temperature", "source_kind": "sql", "source_path": "device.temp"}],
+            }
+        }
+    )
+    assert validation["release_recommendation"] == "review"
+    assert any(item["code"] == "property.duplicate" for item in validation["warnings"])
+    assert any(item["code"] == "behavior.duplicate" for item in validation["warnings"])
+    assert any(item["code"] == "property.missing_unit" for item in validation["warnings"])
 
 
 def make_execution_config(packages: list[str]) -> ExecutionConfig:
