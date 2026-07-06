@@ -10,6 +10,197 @@ function escapeText(value) {
   return div.innerHTML;
 }
 
+function renderInlineMarkdown(value) {
+  const parts = String(value ?? "").split(/(`[^`]+`)/g);
+  return parts
+    .map((part) => {
+      if (/^`[^`]+`$/.test(part)) {
+        return `<code>${escapeText(part.slice(1, -1))}</code>`;
+      }
+      let html = escapeText(part);
+      html = html.replace(
+        /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+        (_, label, url) => `<a href="${url}" target="_blank" rel="noreferrer noopener">${label}</a>`,
+      );
+      html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+      html = html.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+      html = html.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+      html = html.replace(/(^|[^_])_([^_\n]+)_(?!_)/g, "$1<em>$2</em>");
+      html = html.replace(/\n/g, "<br>");
+      return html;
+    })
+    .join("");
+}
+
+function isTableHeader(line, nextLine) {
+  return (
+    line.includes("|") &&
+    /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(nextLine || "")
+  );
+}
+
+function isListLine(line) {
+  return /^\s*(?:[-*+]\s+|\d+\.\s+)/.test(line);
+}
+
+function startsMarkdownBlock(line, nextLine) {
+  return (
+    /^```/.test(line) ||
+    /^(#{1,6})\s+/.test(line) ||
+    /^\s*>\s?/.test(line) ||
+    /^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line) ||
+    isListLine(line) ||
+    isTableHeader(line, nextLine)
+  );
+}
+
+function parseTableCells(line) {
+  let normalized = String(line ?? "").trim();
+  if (normalized.startsWith("|")) {
+    normalized = normalized.slice(1);
+  }
+  if (normalized.endsWith("|")) {
+    normalized = normalized.slice(0, -1);
+  }
+  return normalized.split("|").map((cell) => cell.trim());
+}
+
+function parseTableAlignments(line) {
+  return parseTableCells(line).map((cell) => {
+    const value = cell.trim();
+    if (value.startsWith(":") && value.endsWith(":")) {
+      return "center";
+    }
+    if (value.endsWith(":")) {
+      return "right";
+    }
+    return "left";
+  });
+}
+
+function renderMarkdown(value) {
+  const source = String(value ?? "").replace(/\r\n?/g, "\n").trimEnd();
+  if (!source.trim()) {
+    return "";
+  }
+
+  const lines = source.split("\n");
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const nextLine = lines[index + 1] || "";
+
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    const fenceMatch = line.match(/^```([\w-]+)?\s*$/);
+    if (fenceMatch) {
+      const language = fenceMatch[1] || "";
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test(lines[index])) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length && /^```/.test(lines[index])) {
+        index += 1;
+      }
+      const label = language ? `<div class="code-block-label">${escapeText(language)}</div>` : "";
+      blocks.push(
+        `<div class="code-block">${label}<pre><code>${escapeText(codeLines.join("\n"))}</code></pre></div>`,
+      );
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      blocks.push("<hr>");
+      index += 1;
+      continue;
+    }
+
+    if (isTableHeader(line, nextLine)) {
+      const headers = parseTableCells(line);
+      const alignments = parseTableAlignments(nextLine);
+      const rows = [];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+        rows.push(parseTableCells(lines[index]));
+        index += 1;
+      }
+      const headerHtml = headers
+        .map((cell, cellIndex) => `<th class="align-${alignments[cellIndex] || "left"}">${renderInlineMarkdown(cell)}</th>`)
+        .join("");
+      const rowHtml = rows
+        .map(
+          (row) =>
+            `<tr>${row
+              .map(
+                (cell, cellIndex) =>
+                  `<td class="align-${alignments[cellIndex] || "left"}">${renderInlineMarkdown(cell)}</td>`,
+              )
+              .join("")}</tr>`,
+        )
+        .join("");
+      blocks.push(
+        `<div class="table-wrap"><table><thead><tr>${headerHtml}</tr></thead><tbody>${rowHtml}</tbody></table></div>`,
+      );
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quoteLines = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(`<blockquote>${renderMarkdown(quoteLines.join("\n"))}</blockquote>`);
+      continue;
+    }
+
+    if (isListLine(line)) {
+      const ordered = /^\s*\d+\.\s+/.test(line);
+      const tag = ordered ? "ol" : "ul";
+      const items = [];
+      while (index < lines.length) {
+        const current = lines[index];
+        const match = ordered
+          ? current.match(/^\s*\d+\.\s+(.*)$/)
+          : current.match(/^\s*[-*+]\s+(.*)$/);
+        if (!match) {
+          break;
+        }
+        items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);
+        index += 1;
+      }
+      blocks.push(`<${tag}>${items.join("")}</${tag}>`);
+      continue;
+    }
+
+    const paragraphLines = [line];
+    index += 1;
+    while (index < lines.length && lines[index].trim() && !startsMarkdownBlock(lines[index], lines[index + 1] || "")) {
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+    blocks.push(`<p>${renderInlineMarkdown(paragraphLines.join("\n"))}</p>`);
+  }
+
+  return blocks.join("");
+}
+
 async function fetchJson(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
@@ -36,7 +227,7 @@ function addMessage(role, text, steps = [], requestedInputs = [], liveStream = n
   item.innerHTML = `
     <div class="avatar">${avatar}</div>
     <div class="message-body">
-      <div class="bubble">${escapeText(text)}</div>
+      <div class="bubble markdown-body">${renderMarkdown(text)}</div>
       ${role === "assistant" && liveStream ? renderLiveStream(liveStream) : ""}
       ${role === "assistant" && requestedInputs.length ? renderRequestedInputs(requestedInputs) : ""}
       ${role === "assistant" && steps.length ? renderRunLog(steps) : ""}
@@ -50,7 +241,7 @@ function addMessage(role, text, steps = [], requestedInputs = [], liveStream = n
 function updateAssistantMessage(item, text, steps = [], requestedInputs = [], liveStream = null) {
   const bubble = item.querySelector(".bubble");
   const body = item.querySelector(".message-body");
-  bubble.textContent = text;
+  bubble.innerHTML = renderMarkdown(text);
   for (const existing of body.querySelectorAll(".live-stream, .requested-inputs, .run-log")) {
     existing.remove();
   }
@@ -335,7 +526,7 @@ function resetConversation() {
     <div class="message assistant">
       <div class="avatar">AR</div>
       <div class="message-body">
-        <div class="bubble">新会话已创建。输入任务后，运行日志会折叠在回复下方。</div>
+        <div class="bubble markdown-body">新会话已创建。输入任务后，运行日志会折叠在回复下方。</div>
       </div>
     </div>
   `;
