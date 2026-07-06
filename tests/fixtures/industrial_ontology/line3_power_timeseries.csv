@@ -1,0 +1,7 @@
+entity_ref,point_ref,metric_name,ts,value,unit
+machine::machinea,point::factory-line3-machinea-power,power_kw,2026-07-02T14:00:00+00:00,105.0,kW
+machine::machinea,point::factory-line3-machinea-power,power_kw,2026-07-02T15:00:00+00:00,110.0,kW
+machine::machinea,point::factory-line3-machinea-power,power_kw,2026-07-02T16:00:00+00:00,108.0,kW
+machine::machinea,point::factory-line3-machinea-power,power_kw,2026-07-03T14:00:00+00:00,154.0,kW
+machine::machinea,point::factory-line3-machinea-power,power_kw,2026-07-03T15:00:00+00:00,160.0,kW
+machine::machinea,point::factory-line3-machinea-power,power_kw,2026-07-03T16:00:00+00:00,158.0,kW

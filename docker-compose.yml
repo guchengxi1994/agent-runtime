@@ -27,9 +27,11 @@ services:
     environment:
       ARTISAN_PLUGIN_SERVER_PORT: "8001"
       ARTISAN_PLUGIN_RUNTIME_DIR: /app/plugins_runtime
+      AGENT_RUNTIME_ARTIFACTS_DIR: /app/artifacts
     ports:
       - "8001:8001" # expose port when developing
     volumes:
+      - ./artifacts:/app/artifacts
       - sandbox-runtime:/app/plugins_runtime
 
 volumes:

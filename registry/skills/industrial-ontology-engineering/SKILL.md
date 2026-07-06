@@ -54,10 +54,14 @@ Treat each skill as an ontology engineering capability inside a governed lifecyc
 6. Use `ontology-mapping` to bind canonical ontology fields to SQL tables, API paths, PLC registers, MQTT topics, or OPC UA nodes.
 7. Use `ontology-behavior-discovery` to convert commands, procedures, workflows, or write paths into callable object behaviors.
 8. Use `ontology-knowledge-linking` to attach SOPs, manuals, maintenance logs, CAD, images, and videos to ontology nodes.
-9. Use `ontology-validation` and `ontology-structure-validator` before any release or runtime usage.
-10. Use `ontology-publish` for versioning, impact analysis, migration planning, and release readiness.
-11. Use `ontology-evolution` for drift detection, rescans, and update recommendations.
-12. Use `ai-ontology-designer` whenever the task requires design rationale, standards alignment, conflict resolution, or change recommendations across stages.
+9. When extracted objects, mappings, SQL schema, or tag CSV must become reusable runtime state, call `ontology-registry-upsert` to persist them into the current workspace ontology registry.
+10. Before querying or diagnosing, call `ontology-runtime-resolve` to turn business references such as a production line, machine, or metric into concrete entity refs, source bindings, and related runtime context.
+11. Use `timeseries-query-sql` for read-only telemetry or event slices after runtime resolution.
+12. Use `energy-anomaly-diagnose` when the user asks why a line, machine, or process segment shows abnormal energy behavior during a given window.
+13. Use `ontology-validation` and `ontology-structure-validator` before any release or runtime usage.
+14. Use `ontology-publish` for versioning, impact analysis, migration planning, and release readiness.
+15. Use `ontology-evolution` for drift detection, rescans, and update recommendations.
+16. Use `ai-ontology-designer` whenever the task requires design rationale, standards alignment, conflict resolution, or change recommendations across stages.
 
 ## Chat-only mode
 
@@ -102,6 +106,7 @@ When the user has not provided source text yet, ask for one of these four smalle
 - Runtime mapping set.
 - Behavior catalog.
 - Knowledge anchors.
+- Workspace-persistent runtime registry state when the ontology must be reused across turns or conversations.
 - Validation findings and release recommendation.
 - Change log and next evolution triggers.
 

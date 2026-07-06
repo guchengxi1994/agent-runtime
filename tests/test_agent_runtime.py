@@ -427,6 +427,14 @@ def test_industrial_ontology_skills_and_agent_are_registered():
     assert registry.skills["ontology-template-marketplace"].executable is True
     assert "ontology-structure-validator" in registry.skills
     assert registry.skills["ontology-structure-validator"].executable is True
+    assert "ontology-registry-upsert" in registry.skills
+    assert registry.skills["ontology-registry-upsert"].executable is True
+    assert "ontology-runtime-resolve" in registry.skills
+    assert registry.skills["ontology-runtime-resolve"].executable is True
+    assert "timeseries-query-sql" in registry.skills
+    assert registry.skills["timeseries-query-sql"].executable is True
+    assert "energy-anomaly-diagnose" in registry.skills
+    assert registry.skills["energy-anomaly-diagnose"].executable is True
     assert registry.skills["ontology-template-marketplace"].execution_policy["packages"] == []
     assert registry.skills["ontology-structure-validator"].execution_policy["packages"] == []
 
@@ -434,6 +442,10 @@ def test_industrial_ontology_skills_and_agent_are_registered():
     assert "industrial-ontology-engineering" in set(agent.skill_ids or [])
     assert "ontology-template-marketplace" in set(agent.skill_ids or [])
     assert "ontology-structure-validator" in set(agent.skill_ids or [])
+    assert "ontology-registry-upsert" in set(agent.skill_ids or [])
+    assert "ontology-runtime-resolve" in set(agent.skill_ids or [])
+    assert "timeseries-query-sql" in set(agent.skill_ids or [])
+    assert "energy-anomaly-diagnose" in set(agent.skill_ids or [])
 
 
 def test_steel_energy_skills_execute_representative_cases():

@@ -575,6 +575,7 @@ class AgentRuntime:
                             SkillExecutionContext(
                                 agent_id=agent.id,
                                 conversation_id=conversation.id,
+                                workspace_id=conversation.workspace_id,
                                 user_id=request.user.id,
                                 run_id=run_id,
                             ),

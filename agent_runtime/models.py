@@ -155,6 +155,7 @@ class ChatRequest(BaseModel):
 class SkillExecutionContext(BaseModel):
     agent_id: str
     conversation_id: str
+    workspace_id: str
     user_id: str
     run_id: str
 

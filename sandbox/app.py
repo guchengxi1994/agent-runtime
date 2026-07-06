@@ -143,6 +143,7 @@ def build_skill_execution_metadata(
         "execution_id": execution_id,
         "agent_id": str(context.get("agent_id") or "default"),
         "conversation_id": str(context.get("conversation_id") or ""),
+        "workspace_id": str(context.get("workspace_id") or ""),
         "run_id": str(context.get("run_id") or ""),
         "user_id": str(context.get("user_id") or ""),
         "skill_name": str(skill.get("name") or ""),
@@ -463,6 +464,13 @@ async def execute_skill(request: Request) -> JSONResponse:
         )
 
     merged_env = dict(policy.get("env") or {})
+    merged_env.setdefault("AGENT_RUNTIME_WORKSPACE_ID", str(context.get("workspace_id") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_CONVERSATION_ID", str(context.get("conversation_id") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_AGENT_ID", str(context.get("agent_id") or "default"))
+    merged_env.setdefault("AGENT_RUNTIME_RUN_ID", str(context.get("run_id") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_USER_ID", str(context.get("user_id") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_SKILL_NAME", str(skill.get("name") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_ARTIFACTS_DIR", os.getenv("AGENT_RUNTIME_ARTIFACTS_DIR", "/app/artifacts"))
     merged_env.update(secret_env)
     policy["env"] = merged_env
 
