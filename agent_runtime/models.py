@@ -127,9 +127,16 @@ class ChatAttachment(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ArtifactRef(BaseModel):
+    conversation_id: str
+    artifact_id: str
+    workspace_id: str | None = None
+
+
 class ChatRequest(BaseModel):
     message: str
     agent_id: str = "default"
+    workspace_id: str | None = None
     conversation_id: str | None = None
     skill_ids: list[str] | None = None
     attachments: list[ChatAttachment] = Field(default_factory=list)
@@ -189,6 +196,7 @@ class RuntimeStepTrace(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    workspace_id: str
     conversation_id: str
     agent_id: str
     message: str
@@ -201,6 +209,7 @@ class ChatResponse(BaseModel):
 
 class ConversationState(BaseModel):
     id: str
+    workspace_id: str
     agent_id: str = "default"
     messages: list[dict[str, Any]] = Field(default_factory=list)
     active_skill_ids: list[str] = Field(default_factory=list)

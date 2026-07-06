@@ -1,5 +1,6 @@
 const state = {
   conversationId: null,
+  workspaceId: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -398,6 +399,10 @@ function buildRequest(message, uploadedFiles = []) {
   if (state.conversationId) {
     body.append("conversation_id", state.conversationId);
   }
+  const workspaceId = ($("workspaceInput").value || "").trim() || state.workspaceId;
+  if (workspaceId) {
+    body.append("workspace_id", workspaceId);
+  }
   for (const file of uploadedFiles) {
     body.append("files", file);
   }
@@ -489,7 +494,11 @@ async function sendMessage(event) {
       },
       message(payload) {
         state.conversationId = payload.conversation_id;
-        $("conversationId").textContent = `conversation: ${state.conversationId}`;
+        state.workspaceId = payload.workspace_id || state.workspaceId;
+        if (state.workspaceId) {
+          $("workspaceInput").value = state.workspaceId;
+        }
+        syncSessionMeta();
         const suffix = payload.status === "waiting_for_user" ? "\n\n状态：等待用户补充信息。" : "";
         const requestedInputs = payload.status === "waiting_for_user" ? payload.requested_inputs || [] : [];
         updateAssistantMessage(
@@ -555,9 +564,15 @@ function parseSseChunk(chunk) {
   return { type, data: JSON.parse(rawData) };
 }
 
+function syncSessionMeta() {
+  const conversationText = state.conversationId ? state.conversationId : "new";
+  const workspaceText = ($("workspaceInput").value || "").trim() || state.workspaceId || "auto";
+  $("sessionMeta").textContent = `conversation: ${conversationText} · workspace: ${workspaceText}`;
+}
+
 function resetConversation() {
   state.conversationId = null;
-  $("conversationId").textContent = "conversation: new";
+  syncSessionMeta();
   $("messages").innerHTML = `
     <div class="message assistant">
       <div class="avatar">AR</div>
@@ -572,11 +587,13 @@ function init() {
   $("chatForm").addEventListener("submit", sendMessage);
   $("resetConversation").addEventListener("click", resetConversation);
   $("fileInput").addEventListener("change", syncSelectedFiles);
+  $("workspaceInput").addEventListener("input", syncSessionMeta);
   $("messageInput").addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       $("chatForm").requestSubmit();
     }
   });
+  syncSessionMeta();
   $("messageInput").focus();
 }
 

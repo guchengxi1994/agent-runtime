@@ -36,6 +36,7 @@ After a skill is activated, follow its harness document. Let the harness guide w
 If required user input is missing, call `request_user_input` instead of guessing.
 At the start of each turn, infer from the full conversation whether the latest user intent is to continue, revise, or restart prior work. Do not rely on literal keyword matching. If the user intent is to continue a prior workflow after a round limit, tool failure, or partial progress, reuse existing tool observations and avoid repeating successful tool calls unless their results were empty, failed, stale, or insufficient. Prefer targeted next actions or synthesis over restarting from scratch.
 When a user message starts with 'Parsed attachments for the immediately preceding user request', treat it as parsed file context belonging to the previous user turn, not as a new request.
+When a user message starts with 'Workspace resume context for the current request', treat it as stored workspace context for the current user turn, not as a new request.
 When tool results are mixed, distinguish failed or empty attempts from successful usable observations. Do not say a whole tool category failed if another attempt or stored artifact succeeded; cite artifact ids or call `read_artifact` when using stored evidence.
 When calling `request_user_input`, make the user-facing request self-contained:
 - Ask only for information that blocks the next planning or execution step.
@@ -154,10 +155,22 @@ LIST_ARTIFACTS_TOOL = {
     "type": "function",
     "function": {
         "name": "list_artifacts",
-        "description": "List stored artifacts and compact tool observations for the current conversation.",
+        "description": "List stored artifacts for the current workspace, optionally narrowed to a conversation or artifact kind.",
         "parameters": {
             "type": "object",
             "properties": {
+                "workspace_id": {
+                    "type": "string",
+                    "description": "Optional workspace id. Omit to use the current workspace.",
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Optional conversation id to narrow results to one conversation within the workspace.",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": "Optional artifact kind filter such as checkpoint, sandbox_execution, runtime_call, or model_planning.",
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Maximum number of recent artifacts to return.",
@@ -172,13 +185,21 @@ READ_ARTIFACT_TOOL = {
     "type": "function",
     "function": {
         "name": "read_artifact",
-        "description": "Read a stored artifact by artifact_id when full tool output is needed.",
+        "description": "Read a stored artifact by artifact_id when full tool output, checkpoint content, or prior evidence is needed.",
         "parameters": {
             "type": "object",
             "properties": {
                 "artifact_id": {
                     "type": "string",
                     "description": "Artifact id from list_artifacts or an observation artifact reference.",
+                },
+                "workspace_id": {
+                    "type": "string",
+                    "description": "Optional workspace id. Omit to use the current workspace.",
+                },
+                "conversation_id": {
+                    "type": "string",
+                    "description": "Optional conversation id if the workspace should be resolved from a known conversation.",
                 },
                 "max_chars": {
                     "type": "integer",
@@ -187,6 +208,41 @@ READ_ARTIFACT_TOOL = {
                 },
             },
             "required": ["artifact_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+CREATE_CHECKPOINT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "create_checkpoint",
+        "description": (
+            "Persist a resumable workspace checkpoint after a meaningful stage boundary such as ontology draft, mapping set, "
+            "validation state, or analysis result."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Short checkpoint title.",
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Compact explanation of what this checkpoint preserves and when it should be reused.",
+                },
+                "payload": {
+                    "type": "object",
+                    "description": "Structured checkpoint payload to persist. Keep it compact, explicit, and resumable.",
+                    "additionalProperties": True,
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional tags such as ontology, mapping, validation, checkpoint, energy-analysis.",
+                },
+            },
+            "required": ["title", "summary", "payload"],
             "additionalProperties": False,
         },
     },
@@ -237,6 +293,7 @@ class AgentRuntime:
         agent = self._resolve_agent(request)
         conversation = self._get_or_create_conversation(request, agent)
         run_id = f"run_{uuid.uuid4().hex}"
+        self.artifacts.register_conversation(conversation.id, conversation.workspace_id, agent.id)
         available_skills = self._available_skills(request, agent)
         activated_skills = self._explicit_or_active_skills(request, conversation, available_skills)
         pending_input_request = conversation.pending_input_request
@@ -248,13 +305,21 @@ class AgentRuntime:
         conversation.updated_at = datetime.now(timezone.utc)
 
         messages = [
-            {"role": "system", "content": self._build_system_prompt(agent, available_skills, activated_skills)}
+            {
+                "role": "system",
+                "content": self._build_system_prompt(
+                    agent,
+                    available_skills,
+                    activated_skills,
+                    workspace_id=conversation.workspace_id,
+                ),
+            }
         ]
         artifact_context_index: int | None = None
 
         def refresh_artifact_context() -> None:
             nonlocal artifact_context_index
-            artifact_context = self.artifacts.build_context(conversation.id)
+            artifact_context = self.artifacts.build_context(conversation.workspace_id, conversation.id)
             if not artifact_context:
                 return
             artifact_message = {"role": "system", "content": artifact_context}
@@ -309,6 +374,7 @@ class AgentRuntime:
             assistant_message = model_turn["assistant_message"]
             reasoning_text = model_turn["reasoning_text"]
             self.artifacts.write_model_trace(
+                workspace_id=conversation.workspace_id,
                 conversation_id=conversation.id,
                 run_id=run_id,
                 round_index=round_index,
@@ -349,6 +415,7 @@ class AgentRuntime:
                 )
                 self._log_run_summary(run_id, "completed", steps, content)
                 return ChatResponse(
+                    workspace_id=conversation.workspace_id,
                     conversation_id=conversation.id,
                     agent_id=agent.id,
                     message=content,
@@ -368,7 +435,12 @@ class AgentRuntime:
                     result = self._activate_skill(args, available_skills, activated_skills, conversation)
                     messages[0] = {
                         "role": "system",
-                        "content": self._build_system_prompt(agent, available_skills, activated_skills),
+                        "content": self._build_system_prompt(
+                            agent,
+                            available_skills,
+                            activated_skills,
+                            workspace_id=conversation.workspace_id,
+                        ),
                     }
                     self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "read_skill_resource":
@@ -377,20 +449,40 @@ class AgentRuntime:
                 elif tool_name == "list_artifacts":
                     limit = self._coerce_int(args.get("limit"), 50)
                     result = self.artifacts.list_artifacts(
-                        conversation.id,
-                        limit,
+                        workspace_id=str(args.get("workspace_id") or "").strip() or conversation.workspace_id,
+                        conversation_id=str(args.get("conversation_id") or "").strip() or None,
+                        kind=str(args.get("kind") or "").strip() or None,
+                        limit=limit,
                     )
-                    self._log_artifact_list(run_id, conversation.id, tool_call_id, limit, result)
+                    self._log_artifact_list(
+                        run_id,
+                        str(result.get("workspace_id") or conversation.workspace_id),
+                        tool_call_id,
+                        limit,
+                        result,
+                    )
                     self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "read_artifact":
                     artifact_id = str(args.get("artifact_id") or "")
                     max_chars = self._coerce_int(args.get("max_chars"), 12000)
                     result = self.artifacts.read_artifact(
-                        conversation.id,
+                        artifact_id=artifact_id,
+                        workspace_id=str(args.get("workspace_id") or "").strip() or conversation.workspace_id,
+                        conversation_id=str(args.get("conversation_id") or "").strip() or None,
+                        max_chars=max_chars,
+                    )
+                    self._log_artifact_read(
+                        run_id,
+                        str(result.get("workspace_id") or conversation.workspace_id),
+                        tool_call_id,
                         artifact_id,
                         max_chars,
+                        result,
                     )
-                    self._log_artifact_read(run_id, conversation.id, tool_call_id, artifact_id, max_chars, result)
+                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
+                elif tool_name == "create_checkpoint":
+                    result = self._create_checkpoint(args, conversation, run_id)
+                    refresh_artifact_context()
                     self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "request_user_input":
                     question = str(args.get("question", "")).strip() or "请补充继续执行所需的信息。"
@@ -457,6 +549,7 @@ class AgentRuntime:
                     )
                     self._log_run_summary(run_id, "waiting_for_user", steps, question)
                     return ChatResponse(
+                        workspace_id=conversation.workspace_id,
                         conversation_id=conversation.id,
                         agent_id=agent.id,
                         message=question,
@@ -512,8 +605,9 @@ class AgentRuntime:
                     )
                 )
                 observation_result = result
-                if tool_name not in {"list_artifacts", "read_artifact"}:
+                if tool_name not in {"list_artifacts", "read_artifact", "create_checkpoint"}:
                     artifact = self.artifacts.write_tool_artifact(
+                        workspace_id=conversation.workspace_id,
                         conversation_id=conversation.id,
                         run_id=run_id,
                         tool_name=tool_name,
@@ -547,6 +641,7 @@ class AgentRuntime:
         )
         self._log_run_summary(run_id, "failed", steps, final_message)
         return ChatResponse(
+            workspace_id=conversation.workspace_id,
             conversation_id=conversation.id,
             agent_id=agent.id,
             message=final_message,
@@ -868,9 +963,18 @@ class AgentRuntime:
                 raise AgentRequestError(
                     f"Conversation {conversation.id} belongs to agent {conversation.agent_id}, not {agent.id}"
                 )
+            if request.workspace_id and request.workspace_id != conversation.workspace_id:
+                raise AgentRequestError(
+                    f"Conversation {conversation.id} belongs to workspace {conversation.workspace_id}, not {request.workspace_id}"
+                )
             return conversation
         conversation_id = request.conversation_id or f"conv_{uuid.uuid4().hex}"
-        conversation = ConversationState(id=conversation_id, agent_id=agent.id)
+        workspace_id = (
+            str(request.workspace_id or "").strip()
+            or self.artifacts.resolve_workspace_id(conversation_id=conversation_id)
+            or f"ws_{uuid.uuid4().hex}"
+        )
+        conversation = ConversationState(id=conversation_id, workspace_id=workspace_id, agent_id=agent.id)
         self.conversations[conversation_id] = conversation
         return conversation
 
@@ -911,6 +1015,7 @@ class AgentRuntime:
         agent: AgentDefinition,
         available_skills: dict[str, SkillDefinition],
         activated_skills: list[SkillDefinition],
+        workspace_id: str | None = None,
     ) -> str:
         parts = [BASE_SYSTEM_PROMPT]
         parts.append(
@@ -920,6 +1025,8 @@ class AgentRuntime:
             f"- description: {agent.description or 'No description'}\n"
             "The server exposes executable skills as callable functions and harness skills through activate_skill."
         )
+        if workspace_id:
+            parts.append(f"Current workspace:\n- workspace_id: {workspace_id}")
         if available_skills:
             catalog = [
                 f"- {skill.name}: {skill.description}"
@@ -965,6 +1072,7 @@ class AgentRuntime:
             REQUEST_USER_INPUT_TOOL,
             LIST_ARTIFACTS_TOOL,
             READ_ARTIFACT_TOOL,
+            CREATE_CHECKPOINT_TOOL,
             *[skill.to_openai_tool() for skill in executable_skills],
         ]
         if include_skill_activation:
@@ -1014,6 +1122,43 @@ class AgentRuntime:
             "skill_name": skill.name,
             "path": resource_path,
             "content": content,
+        }
+
+    def _create_checkpoint(
+        self,
+        args: dict[str, Any],
+        conversation: ConversationState,
+        run_id: str,
+    ) -> dict[str, Any]:
+        title = str(args.get("title") or "").strip() or "Workspace checkpoint"
+        summary = str(args.get("summary") or "").strip() or title
+        payload = args.get("payload")
+        if not isinstance(payload, dict) or not payload:
+            return {"success": False, "error": "payload must be a non-empty object"}
+        raw_tags = args.get("tags")
+        tags = [str(item).strip() for item in raw_tags if str(item).strip()] if isinstance(raw_tags, list) else []
+        checkpoint = self.artifacts.write_checkpoint(
+            workspace_id=conversation.workspace_id,
+            conversation_id=conversation.id,
+            run_id=run_id,
+            title=title,
+            summary=summary,
+            payload=payload,
+            tags=tags,
+        )
+        return {
+            "success": True,
+            "workspace_id": conversation.workspace_id,
+            "conversation_id": conversation.id,
+            "artifact_ref": {
+                "workspace_id": checkpoint.workspace_id,
+                "conversation_id": checkpoint.conversation_id,
+                "artifact_id": checkpoint.artifact_id,
+            },
+            "kind": "checkpoint",
+            "title": title,
+            "summary": summary,
+            "tags": tags,
         }
 
     @staticmethod
@@ -1176,15 +1321,15 @@ class AgentRuntime:
     @staticmethod
     def _log_artifact_list(
         run_id: str,
-        conversation_id: str,
+        workspace_id: str,
         tool_call_id: str,
         limit: int,
         result: dict[str, Any],
     ) -> None:
         logger.info(
-            "ARTIFACT_LIST run_id=%s conversation_id=%s status=%s count=%s returned=%s limit=%s tool_call_id=%s",
+            "ARTIFACT_LIST run_id=%s workspace_id=%s status=%s count=%s returned=%s limit=%s tool_call_id=%s",
             run_id,
-            conversation_id,
+            workspace_id,
             "completed" if result.get("success") is not False else "failed",
             result.get("count"),
             len(result.get("artifacts") or []) if isinstance(result.get("artifacts"), list) else 0,
@@ -1195,16 +1340,16 @@ class AgentRuntime:
     @staticmethod
     def _log_artifact_read(
         run_id: str,
-        conversation_id: str,
+        workspace_id: str,
         tool_call_id: str,
         artifact_id: str,
         max_chars: int,
         result: dict[str, Any],
     ) -> None:
         logger.info(
-            "ARTIFACT_READ run_id=%s conversation_id=%s artifact_id=%s status=%s truncated=%s total_chars=%s max_chars=%s summary=%s tool_call_id=%s",
+            "ARTIFACT_READ run_id=%s workspace_id=%s artifact_id=%s status=%s truncated=%s total_chars=%s max_chars=%s summary=%s tool_call_id=%s",
             run_id,
-            conversation_id,
+            workspace_id,
             artifact_id,
             "completed" if result.get("success") is not False else "failed",
             result.get("truncated"),

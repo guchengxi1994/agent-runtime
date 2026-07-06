@@ -161,6 +161,7 @@ async def build_chat_request(http_request: Request) -> ChatRequest:
                 {
                     "message": message,
                     "agent_id": str(form.get("agent_id") or "default"),
+                    "workspace_id": str(form.get("workspace_id") or "").strip() or None,
                     "conversation_id": str(form.get("conversation_id") or "").strip() or None,
                     "skill_ids": skill_ids,
                     "attachments": [attachment.model_dump() for attachment in attachments],

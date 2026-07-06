@@ -11,23 +11,35 @@ from typing import Any
 
 MAX_SUMMARY_CHARS = 700
 MAX_CONTEXT_CHARS = 8000
-NON_EVIDENCE_TOOLS = {"activate_skill", "read_skill_resource", "request_user_input", "model_planning"}
+NON_EVIDENCE_TOOLS = {
+    "activate_skill",
+    "read_skill_resource",
+    "request_user_input",
+    "model_planning",
+    "create_checkpoint",
+}
 
 
 @dataclass(frozen=True)
 class ArtifactRecord:
     artifact_id: str
+    workspace_id: str
+    conversation_id: str
     relative_path: str
     summary: str
     kind: str
 
     def observation(self) -> dict[str, Any]:
         return {
-            "artifact_id": self.artifact_id,
+            "artifact_ref": {
+                "workspace_id": self.workspace_id,
+                "conversation_id": self.conversation_id,
+                "artifact_id": self.artifact_id,
+            },
             "artifact_path": self.relative_path,
             "artifact_kind": self.kind,
             "summary": self.summary,
-            "read_hint": "Call read_artifact with this artifact_id if full details are needed.",
+            "read_hint": "Call read_artifact with workspace_id and artifact_id if full details are needed.",
         }
 
 
@@ -36,9 +48,52 @@ class ArtifactStore:
         self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def register_conversation(self, conversation_id: str, workspace_id: str, agent_id: str) -> None:
+        meta = {
+            "conversation_id": conversation_id,
+            "workspace_id": workspace_id,
+            "agent_id": agent_id,
+            "updated_at": now_iso(),
+        }
+        path = self._conversation_meta_path(conversation_id)
+        if path.is_file():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                existing = {}
+            if isinstance(existing, dict):
+                meta = {
+                    "conversation_id": existing.get("conversation_id") or conversation_id,
+                    "workspace_id": existing.get("workspace_id") or workspace_id,
+                    "agent_id": existing.get("agent_id") or agent_id,
+                    "created_at": existing.get("created_at") or now_iso(),
+                    "updated_at": now_iso(),
+                }
+        else:
+            meta["created_at"] = meta["updated_at"]
+        path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def resolve_workspace_id(self, *, workspace_id: str | None = None, conversation_id: str | None = None) -> str | None:
+        if workspace_id:
+            return sanitize_id(workspace_id)
+        if not conversation_id:
+            return None
+        path = self._conversation_meta_path(conversation_id)
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        value = str(payload.get("workspace_id") or "").strip()
+        return sanitize_id(value) if value else None
+
     def write_tool_artifact(
         self,
         *,
+        workspace_id: str,
         conversation_id: str,
         run_id: str,
         tool_name: str,
@@ -47,184 +102,262 @@ class ArtifactStore:
         arguments: dict[str, Any],
         result: dict[str, Any],
         execution_id: str | None = None,
+        tags: list[str] | None = None,
     ) -> ArtifactRecord:
-        conversation_root = self._conversation_root(conversation_id)
-        artifacts_dir = conversation_root / "artifacts"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-        manifest = self._read_manifest(conversation_id)
-        artifact_id = f"art_{len(manifest) + 1:04d}_{sanitize_id(tool_name)}"
-        relative_path = f"artifacts/{artifact_id}.json"
-        artifact_path = conversation_root / relative_path
-        created_at = now_iso()
         summary = summarize_result(result)
         status = "failed" if effective_success(result) is False else "completed"
-        payload = {
-            "artifact_id": artifact_id,
-            "created_at": created_at,
-            "conversation_id": conversation_id,
-            "run_id": run_id,
-            "tool_name": tool_name,
-            "tool_call_id": tool_call_id,
-            "execution_id": execution_id,
-            "kind": kind,
-            "arguments": arguments,
-            "result": result,
-            "summary": summary,
-            "status": status,
-        }
-        artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-
-        entry = {
-            "artifact_id": artifact_id,
-            "created_at": created_at,
-            "run_id": run_id,
-            "tool_name": tool_name,
-            "tool_call_id": tool_call_id,
-            "execution_id": execution_id,
-            "kind": kind,
-            "relative_path": relative_path,
-            "summary": summary,
-            "status": status,
-        }
-        manifest.append(entry)
-        self._write_manifest(conversation_id, manifest)
-        self._append_timeline(conversation_id, entry)
-        self._write_manifest_markdown(conversation_id, manifest)
-        self._write_working_state(conversation_id, manifest)
-        return ArtifactRecord(
-            artifact_id=artifact_id,
-            relative_path=relative_path,
-            summary=summary,
+        title = f"{tool_name} output"
+        return self._write_workspace_artifact(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            execution_id=execution_id,
             kind=kind,
+            title=title,
+            summary=summary,
+            status=status,
+            tags=tags or [],
+            content={"arguments": arguments, "result": result},
         )
 
     def write_model_trace(
         self,
         *,
+        workspace_id: str,
         conversation_id: str,
         run_id: str,
         round_index: int,
         request: dict[str, Any],
         response: dict[str, Any],
     ) -> ArtifactRecord:
-        conversation_root = self._conversation_root(conversation_id)
-        artifacts_dir = conversation_root / "artifacts"
-        artifacts_dir.mkdir(parents=True, exist_ok=True)
-
-        manifest = self._read_manifest(conversation_id)
-        artifact_id = f"art_{len(manifest) + 1:04d}_model-planning"
-        relative_path = f"artifacts/{artifact_id}.json"
-        artifact_path = conversation_root / relative_path
-        created_at = now_iso()
         summary = summarize_model_trace(round_index, request, response)
-        payload = {
-            "artifact_id": artifact_id,
-            "created_at": created_at,
-            "conversation_id": conversation_id,
-            "run_id": run_id,
-            "tool_name": "model_planning",
-            "tool_call_id": None,
-            "execution_id": None,
-            "kind": "model_planning",
-            "round_index": round_index,
-            "request": request,
-            "response": response,
-            "summary": summary,
-            "status": "completed",
-        }
-        artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
-
-        entry = {
-            "artifact_id": artifact_id,
-            "created_at": created_at,
-            "run_id": run_id,
-            "tool_name": "model_planning",
-            "tool_call_id": None,
-            "execution_id": None,
-            "kind": "model_planning",
-            "relative_path": relative_path,
-            "summary": summary,
-            "status": "completed",
-            "round_index": round_index,
-        }
-        manifest.append(entry)
-        self._write_manifest(conversation_id, manifest)
-        self._append_timeline(conversation_id, entry)
-        self._write_manifest_markdown(conversation_id, manifest)
-        self._write_working_state(conversation_id, manifest)
-        return ArtifactRecord(
-            artifact_id=artifact_id,
-            relative_path=relative_path,
-            summary=summary,
+        return self._write_workspace_artifact(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_name="model_planning",
+            tool_call_id="",
+            execution_id=None,
             kind="model_planning",
+            title=f"Model planning round {round_index}",
+            summary=summary,
+            status="completed",
+            tags=["planning"],
+            content={"round_index": round_index, "request": request, "response": response},
         )
 
-    def list_artifacts(self, conversation_id: str, limit: int = 50) -> dict[str, Any]:
-        self._refresh_manifest_summaries(conversation_id)
-        manifest = self._read_manifest(conversation_id)
+    def write_checkpoint(
+        self,
+        *,
+        workspace_id: str,
+        conversation_id: str,
+        run_id: str,
+        title: str,
+        summary: str,
+        payload: dict[str, Any],
+        tags: list[str] | None = None,
+    ) -> ArtifactRecord:
+        return self._write_workspace_artifact(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            run_id=run_id,
+            tool_name="create_checkpoint",
+            tool_call_id="",
+            execution_id=None,
+            kind="checkpoint",
+            title=title,
+            summary=trim(summary or title),
+            status="completed",
+            tags=tags or [],
+            content={"payload": payload},
+        )
+
+    def list_artifacts(
+        self,
+        *,
+        workspace_id: str | None = None,
+        conversation_id: str | None = None,
+        limit: int = 50,
+        kind: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_workspace_id = self.resolve_workspace_id(workspace_id=workspace_id, conversation_id=conversation_id)
+        if not resolved_workspace_id:
+            return {"success": False, "error": "workspace_id or known conversation_id is required"}
+        self._refresh_workspace_manifest(resolved_workspace_id)
+        manifest = self._read_workspace_manifest(resolved_workspace_id)
+        filtered = manifest
+        if conversation_id:
+            filtered = [item for item in filtered if item.get("conversation_id") == conversation_id]
+        if kind:
+            filtered = [item for item in filtered if item.get("kind") == kind]
         limit = max(1, min(int(limit or 50), 200))
         return {
             "success": True,
+            "workspace_id": resolved_workspace_id,
             "conversation_id": conversation_id,
-            "count": len(manifest),
-            "artifacts": manifest[-limit:],
+            "count": len(filtered),
+            "artifacts": filtered[-limit:],
         }
 
-    def read_artifact(self, conversation_id: str, artifact_id: str, max_chars: int = 12000) -> dict[str, Any]:
+    def read_artifact(
+        self,
+        *,
+        artifact_id: str,
+        workspace_id: str | None = None,
+        conversation_id: str | None = None,
+        max_chars: int = 12000,
+    ) -> dict[str, Any]:
         artifact_id = str(artifact_id or "").strip()
         if not artifact_id:
             return {"success": False, "error": "artifact_id is required"}
-        self._refresh_manifest_summaries(conversation_id)
-        manifest = self._read_manifest(conversation_id)
-        entry = next((item for item in manifest if item.get("artifact_id") == artifact_id), None)
-        if entry is None:
+        resolved_workspace_id = self.resolve_workspace_id(workspace_id=workspace_id, conversation_id=conversation_id)
+        if not resolved_workspace_id:
+            return {"success": False, "error": "workspace_id or known conversation_id is required"}
+        payload, entry = self._load_artifact_payload(resolved_workspace_id, artifact_id)
+        if payload is None or entry is None:
             return {"success": False, "error": f"Artifact not found: {artifact_id}"}
-        relative_path = str(entry.get("relative_path") or "")
-        artifact_path = (self._conversation_root(conversation_id) / relative_path).resolve()
-        try:
-            artifact_path.relative_to(self._conversation_root(conversation_id).resolve())
-        except ValueError:
-            return {"success": False, "error": f"Artifact path escapes conversation root: {artifact_id}"}
-        if not artifact_path.is_file():
-            return {"success": False, "error": f"Artifact file missing: {artifact_id}"}
         max_chars = max(1000, min(int(max_chars or 12000), 50000))
-        content = artifact_path.read_text(encoding="utf-8")
+        content = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
         truncated = len(content) > max_chars
         return {
             "success": True,
+            "workspace_id": resolved_workspace_id,
+            "conversation_id": entry.get("conversation_id"),
             "artifact_id": artifact_id,
-            "relative_path": relative_path,
             "summary": entry.get("summary", ""),
             "content": content[:max_chars],
             "truncated": truncated,
             "total_chars": len(content),
         }
 
-    def build_context(self, conversation_id: str) -> str:
-        self._refresh_manifest_summaries(conversation_id)
-        working_state = self._conversation_root(conversation_id) / "working_state.md"
+    def build_context(self, workspace_id: str, conversation_id: str | None = None) -> str:
+        resolved_workspace_id = self.resolve_workspace_id(workspace_id=workspace_id, conversation_id=conversation_id)
+        if not resolved_workspace_id:
+            return ""
+        self._refresh_workspace_manifest(resolved_workspace_id)
+        working_state = self._workspace_root(resolved_workspace_id) / "working_state.md"
         if not working_state.is_file():
             return ""
         content = working_state.read_text(encoding="utf-8")
         if len(content) > MAX_CONTEXT_CHARS:
             content = content[-MAX_CONTEXT_CHARS:]
-        return (
-            "Artifact context for this conversation. Use list_artifacts/read_artifact when full details are needed; "
-            "do not assume all artifact content is already in the prompt.\n\n"
-            f"{content}"
+        prefix = (
+            "Workspace resume context for the current request. "
+            "Use list_artifacts/read_artifact when exact details are needed; "
+            "do not assume all artifact content is already in the prompt."
+        )
+        if conversation_id:
+            prefix += f" Current conversation_id={conversation_id}."
+        return f"{prefix}\n\n{content}"
+
+    def _write_workspace_artifact(
+        self,
+        *,
+        workspace_id: str,
+        conversation_id: str,
+        run_id: str,
+        tool_name: str,
+        tool_call_id: str,
+        execution_id: str | None,
+        kind: str,
+        title: str,
+        summary: str,
+        status: str,
+        tags: list[str],
+        content: dict[str, Any],
+    ) -> ArtifactRecord:
+        workspace_id = sanitize_id(workspace_id)
+        conversation_id = sanitize_id(conversation_id)
+        manifest = self._read_workspace_manifest(workspace_id)
+        artifact_id = f"art_{len(manifest) + 1:04d}_{sanitize_id(tool_name or kind)}"
+        relative_path = f"artifacts/{artifact_id}.json"
+        artifact_path = self._workspace_root(workspace_id) / relative_path
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        created_at = now_iso()
+        payload = {
+            "artifact_id": artifact_id,
+            "workspace_id": workspace_id,
+            "conversation_id": conversation_id,
+            "created_at": created_at,
+            "run_id": run_id,
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id or None,
+            "execution_id": execution_id,
+            "kind": kind,
+            "title": trim(title or tool_name or kind),
+            "summary": trim(summary),
+            "status": status,
+            "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+            "content": content,
+        }
+        artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        entry = {
+            "artifact_id": artifact_id,
+            "workspace_id": workspace_id,
+            "conversation_id": conversation_id,
+            "created_at": created_at,
+            "run_id": run_id,
+            "tool_name": tool_name,
+            "tool_call_id": tool_call_id or None,
+            "execution_id": execution_id,
+            "kind": kind,
+            "title": payload["title"],
+            "summary": payload["summary"],
+            "status": status,
+            "tags": payload["tags"],
+            "relative_path": relative_path,
+        }
+        manifest.append(entry)
+        self._write_workspace_manifest(workspace_id, manifest)
+        self._append_workspace_timeline(workspace_id, entry)
+        self._write_workspace_manifest_markdown(workspace_id, manifest)
+        self._write_workspace_working_state(workspace_id, manifest)
+        return ArtifactRecord(
+            artifact_id=artifact_id,
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            relative_path=relative_path,
+            summary=payload["summary"],
+            kind=kind,
         )
 
-    def _conversation_root(self, conversation_id: str) -> Path:
-        root = self.root / "conversations" / sanitize_id(conversation_id)
+    def _load_artifact_payload(
+        self,
+        workspace_id: str,
+        artifact_id: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        self._refresh_workspace_manifest(workspace_id)
+        manifest = self._read_workspace_manifest(workspace_id)
+        entry = next((item for item in manifest if item.get("artifact_id") == artifact_id), None)
+        if entry is None:
+            return None, None
+        artifact_path = (self._workspace_root(workspace_id) / str(entry.get("relative_path") or "")).resolve()
+        try:
+            artifact_path.relative_to(self._workspace_root(workspace_id).resolve())
+        except ValueError:
+            return None, None
+        if not artifact_path.is_file():
+            return None, None
+        try:
+            payload = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None, None
+        if not isinstance(payload, dict):
+            return None, None
+        return payload, entry
+
+    def _workspace_root(self, workspace_id: str) -> Path:
+        root = self.root / "workspaces" / sanitize_id(workspace_id)
         root.mkdir(parents=True, exist_ok=True)
         return root
 
-    def _manifest_path(self, conversation_id: str) -> Path:
-        return self._conversation_root(conversation_id) / "manifest.json"
+    def _workspace_manifest_path(self, workspace_id: str) -> Path:
+        return self._workspace_root(workspace_id) / "manifest.json"
 
-    def _read_manifest(self, conversation_id: str) -> list[dict[str, Any]]:
-        path = self._manifest_path(conversation_id)
+    def _read_workspace_manifest(self, workspace_id: str) -> list[dict[str, Any]]:
+        path = self._workspace_manifest_path(workspace_id)
         if not path.is_file():
             return []
         try:
@@ -233,12 +366,82 @@ class ArtifactStore:
             return []
         return data if isinstance(data, list) else []
 
-    def _refresh_manifest_summaries(self, conversation_id: str) -> None:
-        manifest = self._read_manifest(conversation_id)
+    def _write_workspace_manifest(self, workspace_id: str, manifest: list[dict[str, Any]]) -> None:
+        self._workspace_manifest_path(workspace_id).write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
+            encoding="utf-8",
+        )
+
+    def _append_workspace_timeline(self, workspace_id: str, entry: dict[str, Any]) -> None:
+        path = self._workspace_root(workspace_id) / "timeline.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+
+    def _write_workspace_manifest_markdown(self, workspace_id: str, manifest: list[dict[str, Any]]) -> None:
+        lines = ["# Workspace Artifact Manifest", ""]
+        for item in manifest[-100:]:
+            lines.append(
+                f"- `{item.get('artifact_id')}` [{item.get('kind')}] {item.get('tool_name')} "
+                f"status={item.get('status')} run={item.get('run_id')} conversation={item.get('conversation_id')}"
+            )
+            lines.append(f"  - title: {item.get('title', '')}")
+            lines.append(f"  - summary: {item.get('summary', '')}")
+            lines.append(f"  - path: {item.get('relative_path', '')}")
+        (self._workspace_root(workspace_id) / "manifest.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _write_workspace_working_state(self, workspace_id: str, manifest: list[dict[str, Any]]) -> None:
+        recent = manifest[-30:]
+        checkpoints = [item for item in manifest if item.get("kind") == "checkpoint" and item.get("status") == "completed"]
+        evidence = [item for item in recent if _is_successful_evidence(item)]
+        failed_or_empty = [item for item in recent if _is_failed_or_empty_attempt(item)]
+        lines = [
+            "# Workspace Working State",
+            "",
+            f"workspace_id={workspace_id}",
+            "",
+            "This is a compact workspace artifact index. It is not a full transcript.",
+            "",
+            "## Latest Checkpoints",
+        ]
+        if checkpoints:
+            for item in checkpoints[-10:]:
+                lines.append(_format_artifact_line(item))
+        else:
+            lines.append("- No checkpoints yet.")
+        lines.extend(["", "## Recent Successful Evidence"])
+        if evidence:
+            for item in evidence[-10:]:
+                lines.append(_format_artifact_line(item))
+        else:
+            lines.append("- No successful evidence artifacts yet.")
+        lines.extend(["", "## Failed or Empty Attempts"])
+        if failed_or_empty:
+            for item in failed_or_empty[-10:]:
+                lines.append(_format_artifact_line(item))
+        else:
+            lines.append("- No failed or empty attempts yet.")
+        lines.extend(["", "## Recent Workspace Timeline"])
+        for item in recent:
+            lines.append(_format_artifact_line(item))
+        lines.extend(
+            [
+                "",
+                "## Usage Guidance",
+                "- Prefer checkpoint artifacts when resuming longer workflows.",
+                "- Use successful evidence artifacts as usable observations, not just the latest tool status.",
+                "- Distinguish partial failures or empty attempts from overall tool failure.",
+                "- Call `read_artifact` with workspace_id and artifact_id when exact tool output is needed.",
+                "- Call `list_artifacts` when deciding which stored observation or checkpoint to inspect.",
+            ]
+        )
+        (self._workspace_root(workspace_id) / "working_state.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def _refresh_workspace_manifest(self, workspace_id: str) -> None:
+        manifest = self._read_workspace_manifest(workspace_id)
         if not manifest:
             return
-        root = self._conversation_root(conversation_id).resolve()
-        manifest_changed = False
+        root = self._workspace_root(workspace_id).resolve()
+        changed = False
         payload_changed = False
         for item in manifest:
             relative_path = str(item.get("relative_path") or "")
@@ -253,106 +456,38 @@ class ArtifactStore:
                 payload = json.loads(artifact_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 continue
-            result = payload.get("result") if isinstance(payload, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            content = payload.get("content")
+            result = content.get("result") if isinstance(content, dict) else None
             if not isinstance(result, dict):
                 continue
             summary = summarize_result(result)
             status = "failed" if effective_success(result) is False else "completed"
             if item.get("summary") != summary:
                 item["summary"] = summary
-                manifest_changed = True
+                changed = True
             if item.get("status") != status:
                 item["status"] = status
-                manifest_changed = True
+                changed = True
             if payload.get("summary") != summary or payload.get("status") != status:
                 payload["summary"] = summary
                 payload["status"] = status
-                artifact_path.write_text(
-                    json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-                    encoding="utf-8",
-                )
+                artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
                 payload_changed = True
-        if manifest_changed:
-            self._write_manifest(conversation_id, manifest)
-        if manifest_changed or payload_changed:
-            self._write_manifest_markdown(conversation_id, manifest)
-            self._write_working_state(conversation_id, manifest)
+        if changed:
+            self._write_workspace_manifest(workspace_id, manifest)
+        if changed or payload_changed:
+            self._write_workspace_manifest_markdown(workspace_id, manifest)
+            self._write_workspace_working_state(workspace_id, manifest)
 
-    def _write_manifest(self, conversation_id: str, manifest: list[dict[str, Any]]) -> None:
-        self._manifest_path(conversation_id).write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
-            encoding="utf-8",
-        )
+    def _conversation_root(self, conversation_id: str) -> Path:
+        root = self.root / "conversations" / sanitize_id(conversation_id)
+        root.mkdir(parents=True, exist_ok=True)
+        return root
 
-    def _append_timeline(self, conversation_id: str, entry: dict[str, Any]) -> None:
-        path = self._conversation_root(conversation_id) / "timeline.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
-
-    def _write_manifest_markdown(self, conversation_id: str, manifest: list[dict[str, Any]]) -> None:
-        lines = ["# Artifact Manifest", ""]
-        for item in manifest[-100:]:
-            lines.append(
-                f"- `{item.get('artifact_id')}` [{item.get('kind')}] {item.get('tool_name')} "
-                f"status={item.get('status')} run={item.get('run_id')}"
-            )
-            lines.append(f"  - summary: {item.get('summary', '')}")
-            lines.append(f"  - path: {item.get('relative_path', '')}")
-        (self._conversation_root(conversation_id) / "manifest.md").write_text(
-            "\n".join(lines) + "\n",
-            encoding="utf-8",
-        )
-
-    def _write_working_state(self, conversation_id: str, manifest: list[dict[str, Any]]) -> None:
-        recent = manifest[-20:]
-        evidence = [item for item in recent if _is_successful_evidence(item)]
-        failed_or_empty = [item for item in recent if _is_failed_or_empty_attempt(item)]
-        lines = [
-            "# Working State",
-            "",
-            "This is a compact artifact index. It is not a full transcript.",
-            "",
-            "## Successful Evidence Artifacts",
-        ]
-        if evidence:
-            for item in evidence[-10:]:
-                lines.append(_format_artifact_line(item))
-        else:
-            lines.append("- No successful evidence artifacts yet.")
-        lines.extend(
-            [
-                "",
-                "## Failed or Empty Attempts",
-            ]
-        )
-        if failed_or_empty:
-            for item in failed_or_empty[-10:]:
-                lines.append(_format_artifact_line(item))
-        else:
-            lines.append("- No failed or empty attempts yet.")
-        lines.extend(
-            [
-                "",
-                "## Recent Tool Timeline",
-            ]
-        )
-        for item in recent:
-            lines.append(_format_artifact_line(item))
-        lines.extend(
-            [
-                "",
-                "## Usage Guidance",
-                "- Use successful evidence artifacts as usable observations, not just the latest tool status.",
-                "- Distinguish partial failures or empty attempts from overall tool failure.",
-                "- Do not say all search or fetch tools failed when successful evidence artifacts exist.",
-                "- Call `read_artifact` with an artifact id when exact tool output is needed.",
-                "- Call `list_artifacts` when deciding which stored observation to inspect.",
-            ]
-        )
-        (self._conversation_root(conversation_id) / "working_state.md").write_text(
-            "\n".join(lines) + "\n",
-            encoding="utf-8",
-        )
+    def _conversation_meta_path(self, conversation_id: str) -> Path:
+        return self._conversation_root(conversation_id) / "meta.json"
 
 
 def effective_success(result: dict[str, Any]) -> bool | None:
@@ -459,8 +594,9 @@ def summarize_model_trace(round_index: int, request: dict[str, Any], response: d
 
 def _format_artifact_line(item: dict[str, Any]) -> str:
     return (
-        f"- `{item.get('artifact_id')}` step={item.get('tool_name')} "
-        f"status={item.get('status')} summary={item.get('summary', '')}"
+        f"- `{item.get('artifact_id')}` kind={item.get('kind')} step={item.get('tool_name')} "
+        f"status={item.get('status')} conversation={item.get('conversation_id')} "
+        f"summary={item.get('summary', '')}"
     )
 
 

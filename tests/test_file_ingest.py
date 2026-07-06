@@ -105,6 +105,7 @@ def test_chat_endpoint_accepts_multipart_uploads(monkeypatch):
     async def fake_chat(request):
         captured["request"] = request
         return ChatResponse(
+            workspace_id=request.workspace_id or "ws_upload",
             conversation_id="conv_upload",
             agent_id=request.agent_id,
             message="ok",

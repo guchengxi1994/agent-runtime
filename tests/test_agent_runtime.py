@@ -205,6 +205,35 @@ def test_system_prompt_uses_contextual_continuation_policy(tmp_path):
     assert "avoid repeating successful tool calls" in prompt
 
 
+def test_runtime_tools_include_workspace_checkpointing(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+
+    tools = runtime._runtime_tools([], include_skill_activation=False)
+    names = [tool["function"]["name"] for tool in tools]
+
+    assert "list_artifacts" in names
+    assert "read_artifact" in names
+    assert "create_checkpoint" in names
+
+
+def test_conversation_id_reuses_workspace_from_artifact_metadata_after_restart(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    first_runtime = AgentRuntime(settings, registry)
+    request = ChatRequest(message="hello", workspace_id="ws_saved", conversation_id="conv_saved")
+    conversation = first_runtime._get_or_create_conversation(request)
+    first_runtime.artifacts.register_conversation(conversation.id, conversation.workspace_id, "default")
+
+    second_runtime = AgentRuntime(settings, registry)
+    restored = second_runtime._get_or_create_conversation(ChatRequest(message="resume", conversation_id="conv_saved"))
+
+    assert restored.workspace_id == "ws_saved"
+
+
 def test_request_user_input_pauses_and_records_tool_result(tmp_path):
     settings = make_settings(tmp_path)
     registry = FileRegistry(settings.registry_dir)
@@ -231,12 +260,14 @@ def test_request_user_input_pauses_and_records_tool_result(tmp_path):
     assert conversation.pending_input_request is not None
     assert tool_messages
     assert json.loads(tool_messages[-1]["content"])["status"] == "waiting_for_user"
-    artifacts = runtime.artifacts.list_artifacts(response.conversation_id)["artifacts"]
+    artifacts = runtime.artifacts.list_artifacts(workspace_id=response.workspace_id)["artifacts"]
     model_trace = next(item for item in artifacts if item["kind"] == "model_planning")
-    model_trace_content = json.loads(runtime.artifacts.read_artifact(response.conversation_id, model_trace["artifact_id"])["content"])
+    model_trace_content = json.loads(
+        runtime.artifacts.read_artifact(workspace_id=response.workspace_id, artifact_id=model_trace["artifact_id"])["content"]
+    )
     assert model_trace["tool_name"] == "model_planning"
-    assert model_trace_content["request"]["messages"][0]["role"] == "system"
-    assert model_trace_content["response"]["tool_calls"][0]["function"]["name"] == "request_user_input"
+    assert model_trace_content["content"]["request"]["messages"][0]["role"] == "system"
+    assert model_trace_content["content"]["response"]["tool_calls"][0]["function"]["name"] == "request_user_input"
 
 
 def test_request_user_input_does_not_synthesize_missing_field_guidance(tmp_path):
@@ -535,7 +566,9 @@ def test_cached_venv_requires_matching_dependency_marker(tmp_path):
 
 def test_artifact_store_writes_manifest_timeline_and_content(tmp_path):
     store = ArtifactStore(tmp_path / "artifacts")
+    store.register_conversation("conv_test", "ws_test", "default")
     record = store.write_tool_artifact(
+        workspace_id="ws_test",
         conversation_id="conv_test",
         run_id="run_test",
         tool_name="web-search",
@@ -545,22 +578,25 @@ def test_artifact_store_writes_manifest_timeline_and_content(tmp_path):
         result={"success": True, "data": {"query": "steel energy", "results": [{"title": "A", "url": "https://a"}]}},
     )
 
-    listed = store.list_artifacts("conv_test")
-    read = store.read_artifact("conv_test", record.artifact_id)
-    context = store.build_context("conv_test")
+    listed = store.list_artifacts(workspace_id="ws_test")
+    read = store.read_artifact(workspace_id="ws_test", artifact_id=record.artifact_id)
+    context = store.build_context("ws_test", "conv_test")
 
     assert listed["count"] == 1
     assert listed["artifacts"][0]["artifact_id"] == record.artifact_id
+    assert listed["artifacts"][0]["workspace_id"] == "ws_test"
     assert read["success"] is True
     assert "steel energy" in read["content"]
-    assert "Successful Evidence Artifacts" in context
-    assert "Recent Tool Timeline" in context
-    assert (tmp_path / "artifacts" / "conversations" / "conv_test" / "timeline.jsonl").is_file()
+    assert "Recent Successful Evidence" in context
+    assert "Recent Workspace Timeline" in context
+    assert (tmp_path / "artifacts" / "workspaces" / "ws_test" / "timeline.jsonl").is_file()
 
 
 def test_artifact_store_writes_model_trace(tmp_path):
     store = ArtifactStore(tmp_path / "artifacts")
+    store.register_conversation("conv_test", "ws_test", "default")
     record = store.write_model_trace(
+        workspace_id="ws_test",
         conversation_id="conv_test",
         run_id="run_test",
         round_index=0,
@@ -580,23 +616,25 @@ def test_artifact_store_writes_model_trace(tmp_path):
         },
     )
 
-    listed = store.list_artifacts("conv_test")
-    read = store.read_artifact("conv_test", record.artifact_id)
+    listed = store.list_artifacts(workspace_id="ws_test")
+    read = store.read_artifact(workspace_id="ws_test", artifact_id=record.artifact_id)
     payload = json.loads(read["content"])
-    context = store.build_context("conv_test")
+    context = store.build_context("ws_test", "conv_test")
 
     assert listed["artifacts"][0]["kind"] == "model_planning"
     assert listed["artifacts"][0]["tool_name"] == "model_planning"
     assert "input_messages=2" in listed["artifacts"][0]["summary"]
-    assert payload["request"]["messages"][1]["content"] == "hello"
-    assert payload["response"]["assistant_message"]["content"] == "hi"
+    assert payload["content"]["request"]["messages"][1]["content"] == "hello"
+    assert payload["content"]["response"]["assistant_message"]["content"] == "hi"
     assert "model_planning" in context
     assert "No successful evidence artifacts yet." in context
 
 
 def test_artifact_store_marks_nested_skill_failure(tmp_path):
     store = ArtifactStore(tmp_path / "artifacts")
+    store.register_conversation("conv_test", "ws_test", "default")
     record = store.write_tool_artifact(
+        workspace_id="ws_test",
         conversation_id="conv_test",
         run_id="run_test",
         tool_name="web-search-quark",
@@ -614,8 +652,8 @@ def test_artifact_store_marks_nested_skill_failure(tmp_path):
         },
     )
 
-    listed = store.list_artifacts("conv_test")
-    context = store.build_context("conv_test")
+    listed = store.list_artifacts(workspace_id="ws_test")
+    context = store.build_context("ws_test", "conv_test")
 
     assert listed["artifacts"][0]["artifact_id"] == record.artifact_id
     assert listed["artifacts"][0]["status"] == "failed"
@@ -623,32 +661,41 @@ def test_artifact_store_marks_nested_skill_failure(tmp_path):
     assert "Failed or Empty Attempts" in context
 
 
-def test_artifact_store_refreshes_legacy_manifest_status(tmp_path):
+def test_artifact_store_refreshes_workspace_manifest_status(tmp_path):
     store = ArtifactStore(tmp_path / "artifacts")
-    conversation_root = tmp_path / "artifacts" / "conversations" / "conv_test"
-    artifact_dir = conversation_root / "artifacts"
+    workspace_root = tmp_path / "artifacts" / "workspaces" / "ws_test"
+    artifact_dir = workspace_root / "artifacts"
     artifact_dir.mkdir(parents=True)
     artifact_path = artifact_dir / "art_0001_web-search-quark.json"
     payload = {
         "artifact_id": "art_0001_web-search-quark",
+        "workspace_id": "ws_test",
+        "conversation_id": "conv_test",
         "tool_name": "web-search-quark",
-        "result": {
-            "success": True,
-            "data": {
-                "success": False,
-                "error_type": "captcha",
-                "error": "Quark returned a CAPTCHA page.",
-                "results": [],
+        "kind": "sandbox_execution",
+        "summary": "0 result(s).",
+        "status": "completed",
+        "content": {
+            "result": {
+                "success": True,
+                "data": {
+                    "success": False,
+                    "error_type": "captcha",
+                    "error": "Quark returned a CAPTCHA page.",
+                    "results": [],
+                },
             },
         },
-        "summary": "0 result(s).",
     }
     artifact_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    (conversation_root / "manifest.json").write_text(
+    (workspace_root / "manifest.json").write_text(
         json.dumps(
             [
                 {
                     "artifact_id": "art_0001_web-search-quark",
+                    "workspace_id": "ws_test",
+                    "conversation_id": "conv_test",
+                    "kind": "sandbox_execution",
                     "tool_name": "web-search-quark",
                     "relative_path": "artifacts/art_0001_web-search-quark.json",
                     "summary": "0 result(s).",
@@ -659,11 +706,16 @@ def test_artifact_store_refreshes_legacy_manifest_status(tmp_path):
         ),
         encoding="utf-8",
     )
-    (conversation_root / "working_state.md").write_text("legacy", encoding="utf-8")
+    (tmp_path / "artifacts" / "conversations" / "conv_test").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "artifacts" / "conversations" / "conv_test" / "meta.json").write_text(
+        json.dumps({"conversation_id": "conv_test", "workspace_id": "ws_test", "agent_id": "default"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (workspace_root / "working_state.md").write_text("legacy", encoding="utf-8")
 
-    listed = store.list_artifacts("conv_test")
+    listed = store.list_artifacts(workspace_id="ws_test")
     refreshed_payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-    context = store.build_context("conv_test")
+    context = store.build_context("ws_test", "conv_test")
 
     assert listed["artifacts"][0]["status"] == "failed"
     assert "Failed: captcha" in listed["artifacts"][0]["summary"]
@@ -673,7 +725,9 @@ def test_artifact_store_refreshes_legacy_manifest_status(tmp_path):
 
 def test_artifact_store_summarizes_fetch_evidence(tmp_path):
     store = ArtifactStore(tmp_path / "artifacts")
+    store.register_conversation("conv_test", "ws_test", "default")
     record = store.write_tool_artifact(
+        workspace_id="ws_test",
         conversation_id="conv_test",
         run_id="run_test",
         tool_name="web-fetch",
@@ -691,15 +745,40 @@ def test_artifact_store_summarizes_fetch_evidence(tmp_path):
         },
     )
 
-    listed = store.list_artifacts("conv_test")
-    context = store.build_context("conv_test")
+    listed = store.list_artifacts(workspace_id="ws_test")
+    context = store.build_context("ws_test", "conv_test")
 
     assert listed["artifacts"][0]["artifact_id"] == record.artifact_id
     assert listed["artifacts"][0]["status"] == "completed"
     assert "Steel report" in listed["artifacts"][0]["summary"]
     assert "https://example.com/report" in listed["artifacts"][0]["summary"]
     assert "Energy balance content" in listed["artifacts"][0]["summary"]
-    assert "Successful Evidence Artifacts" in context
+    assert "Recent Successful Evidence" in context
+
+
+def test_artifact_store_writes_checkpoint_and_resolves_workspace_from_conversation(tmp_path):
+    store = ArtifactStore(tmp_path / "artifacts")
+    store.register_conversation("conv_test", "ws_test", "default")
+    record = store.write_checkpoint(
+        workspace_id="ws_test",
+        conversation_id="conv_test",
+        run_id="run_test",
+        title="Ontology draft checkpoint",
+        summary="Preserves current object and mapping draft for resume.",
+        payload={"objects": ["Machine", "Alarm"], "next_step": "validation"},
+        tags=["ontology", "checkpoint"],
+    )
+
+    listed = store.list_artifacts(conversation_id="conv_test", kind="checkpoint")
+    read = store.read_artifact(conversation_id="conv_test", artifact_id=record.artifact_id)
+    context = store.build_context("ws_test", "conv_test")
+
+    assert listed["success"] is True
+    assert listed["workspace_id"] == "ws_test"
+    assert listed["artifacts"][0]["kind"] == "checkpoint"
+    assert read["success"] is True
+    assert "Ontology draft checkpoint" in read["content"]
+    assert "Latest Checkpoints" in context
 
 
 def test_artifact_observation_uses_effective_success_and_page_excerpt():
