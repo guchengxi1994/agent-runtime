@@ -1491,12 +1491,12 @@ async def execute_bundle_runtime(
             bundle_meta["total_uncompressed_bytes"],
             bundle_info["entrypoint"],
         )
-        workspace.script_path.write_text(build_script_wrapper(script), encoding="utf-8")
+        bundle_info["entrypoint_path"].write_text(build_script_wrapper(script), encoding="utf-8")
         workspace.payload_path.write_text(build_runtime_payload("execute", params), encoding="utf-8")
         logger.info(
-            "[%s] Prepared bundle execution files: script_path=%s, payload_path=%s",
+            "[%s] Prepared bundle execution files: entrypoint_path=%s, payload_path=%s",
             plugin_id,
-            workspace.script_path,
+            bundle_info["entrypoint_path"],
             workspace.payload_path,
         )
         await complete_phase_event(
@@ -1506,14 +1506,14 @@ async def execute_bundle_runtime(
             total_uncompressed_bytes=bundle_meta["total_uncompressed_bytes"],
             entrypoint=bundle_info["entrypoint"],
             manifest_path=str(bundle_info["manifest_path"]),
-            script_path=str(workspace.script_path),
+            script_path=str(bundle_info["entrypoint_path"]),
             payload_path=str(workspace.payload_path),
         )
 
         venv_dir = await ensure_venv(workspace, config, budget, settings, plugin_id, stdout_queue)
         runner_path = Path(__file__).resolve().parent.parent / "runner.py"
         venv_python = get_venv_python(venv_dir)
-        command = [str(venv_python), str(runner_path), str(workspace.script_path), str(workspace.payload_path)]
+        command = [str(venv_python), str(runner_path), str(bundle_info["entrypoint_path"]), str(workspace.payload_path)]
         logger.info("[%s] Launching bundle runner: cwd=%s, command=%s", plugin_id, bundle_dir, command)
         execute_phase = await emit_phase_event(
             stdout_queue,
@@ -1591,13 +1591,12 @@ async def execute_bundle_runtime(
         )
         if config.keep_venv:
             logger.info("[%s] keep_venv enabled; preserving venv at %s", plugin_id, workspace.venv_dir)
-            unlink_if_exists(workspace.script_path)
             unlink_if_exists(workspace.payload_path)
             await complete_phase_event(
                 stdout_queue,
                 post_phase,
                 preserved_venv=str(workspace.venv_dir),
-                cleaned_paths=[str(workspace.script_path), str(workspace.payload_path)],
+                cleaned_paths=[str(workspace.payload_path)],
             )
         else:
             await cleanup_workspace(workspace)
@@ -1779,19 +1778,19 @@ async def validate_bundle_runtime(
             logger.info("[%s] Bundle validation failed during static checks", plugin_id)
             return static_validation
 
-        workspace.script_path.write_text(build_script_wrapper(script), encoding="utf-8")
+        bundle_info["entrypoint_path"].write_text(build_script_wrapper(script), encoding="utf-8")
         workspace.payload_path.write_text(build_runtime_payload("getDefinition"), encoding="utf-8")
         logger.info(
-            "[%s] Prepared bundle validation files: script_path=%s, payload_path=%s",
+            "[%s] Prepared bundle validation files: entrypoint_path=%s, payload_path=%s",
             plugin_id,
-            workspace.script_path,
+            bundle_info["entrypoint_path"],
             workspace.payload_path,
         )
 
         venv_dir = await ensure_venv(workspace, config, budget, settings, plugin_id)
         runner_path = Path(__file__).resolve().parent.parent / "runner.py"
         venv_python = get_venv_python(venv_dir)
-        command = [str(venv_python), str(runner_path), str(workspace.script_path), str(workspace.payload_path)]
+        command = [str(venv_python), str(runner_path), str(bundle_info["entrypoint_path"]), str(workspace.payload_path)]
         logger.info("[%s] Launching bundle validation runner: cwd=%s, command=%s", plugin_id, bundle_dir, command)
         execute_phase = PhaseContext(plugin_id=plugin_id, phase=PHASE_EXECUTE, started_at=time.monotonic())
         result_meta = await run_subprocess(
@@ -1903,7 +1902,6 @@ async def validate_bundle_runtime(
         }
     finally:
         if config.keep_venv:
-            unlink_if_exists(workspace.script_path)
             unlink_if_exists(workspace.payload_path)
         else:
             await cleanup_workspace(workspace)

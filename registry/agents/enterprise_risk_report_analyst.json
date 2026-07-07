@@ -1,0 +1,22 @@
+{
+  "id": "enterprise_risk_report_analyst",
+  "name": "企业风险报告分析助手",
+  "description": "基于数据库指标、精选案例证据和图表化输出生成结构化企业法律风险与治理分析报告。",
+  "enabled": true,
+  "skill_ids": [
+    "enterprise-risk-report",
+    "case-library-review",
+    "pg-case-search",
+    "pg-report-query",
+    "chart-spec-builder",
+    "web-search",
+    "web-fetch",
+    "calculator"
+  ],
+  "capability_hints": [
+    "结构化报告生成",
+    "法律风险分析",
+    "图表化报告输出",
+    "数据库优先的案例检索"
+  ]
+}

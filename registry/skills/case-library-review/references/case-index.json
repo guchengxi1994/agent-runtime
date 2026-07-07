@@ -1,0 +1,32 @@
+[
+  {
+    "case_id": "case_001_hotel_leaseback",
+    "title": "酒店售后回租后的现金流压力",
+    "topic": "leaseback",
+    "risk_type": "cash_flow",
+    "industry": "hospitality",
+    "year": 2024,
+    "amount_band": "50m-100m",
+    "path": "references/cases/case_001_hotel_leaseback.md"
+  },
+  {
+    "case_id": "case_002_illegal_subcontracting",
+    "title": "违法分包与工程款回收风险",
+    "topic": "subcontracting",
+    "risk_type": "compliance",
+    "industry": "construction",
+    "year": 2025,
+    "amount_band": "10m-50m",
+    "path": "references/cases/case_002_illegal_subcontracting.md"
+  },
+  {
+    "case_id": "case_003_pre_restructuring_failure",
+    "title": "重组前治理失序案例",
+    "topic": "restructuring",
+    "risk_type": "governance",
+    "industry": "manufacturing",
+    "year": 2023,
+    "amount_band": "100m+",
+    "path": "references/cases/case_003_pre_restructuring_failure.md"
+  }
+]

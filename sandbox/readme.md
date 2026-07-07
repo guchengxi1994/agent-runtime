@@ -112,7 +112,12 @@ def execute(params: dict):
 - `POST /bundle/execute`: zip bundle 执行
 - `POST /bundle/execute/stream`: zip bundle SSE 执行
 
-主 runtime 只依赖 `/skills/execute`。其他入口保留用于本地调试和底层 runner 验证，不再表示上层 tool 抽象。
+主 runtime 会按 skill 结构自动选择执行入口：
+
+- 单文件 executable skill 走 `/skills/execute`
+- 多文件 executable skill 走 `/bundle/execute`
+
+其他入口保留用于本地调试和底层 runner 验证，不再表示上层 tool 抽象。
 
 ## execution_policy
 

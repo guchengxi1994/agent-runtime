@@ -280,7 +280,13 @@ def extract_runtime_metadata(metadata: dict[str, object]) -> dict[str, object]:
 def discover_skill_resources(skill_dir: Path) -> list[SkillResource]:
     resources: list[SkillResource] = []
     for path in sorted(skill_dir.rglob("*")):
-        if not path.is_file() or path.name == "SKILL.md" or path.name.startswith("."):
+        if (
+            not path.is_file()
+            or path.name == "SKILL.md"
+            or path.name.startswith(".")
+            or "__pycache__" in path.parts
+            or path.suffix.lower() in {".pyc", ".pyo"}
+        ):
             continue
         relative = path.relative_to(skill_dir).as_posix()
         resources.append(SkillResource(path=relative, title=path.stem.replace("-", " ").replace("_", " ")))
