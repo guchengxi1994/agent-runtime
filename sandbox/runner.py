@@ -12,6 +12,9 @@ RUNNER_RESULT_PREFIX = "__ARTISAN_PLUGIN_RESULT__="
 
 
 def load_module(script_path: Path):
+    script_dir = str(script_path.parent)
+    if script_dir not in sys.path:
+        sys.path.insert(0, script_dir)
     spec = importlib.util.spec_from_file_location(f"plugin_module_{script_path.stem}", script_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Unable to load plugin script: {script_path}")

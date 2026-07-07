@@ -25,7 +25,7 @@ from .models import (
 from .permissions import is_allowed
 from .registry import FileRegistry
 from .logging_utils import logger
-from .runner_client import SandboxClient
+from .runner_client import SandboxClient, skill_uses_bundle
 
 
 BASE_SYSTEM_PROMPT = """You are an enterprise agent runtime.
@@ -568,20 +568,29 @@ class AgentRuntime:
                         result = {"success": False, "error": f"Permission denied for skill: {tool_name}"}
                         self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                     else:
-                        script = self.registry.read_skill_entrypoint(skill)
-                        result = await self.runner.execute_skill(
-                            skill,
-                            args,
-                            SkillExecutionContext(
-                                agent_id=agent.id,
-                                conversation_id=conversation.id,
-                                workspace_id=conversation.workspace_id,
-                                user_id=request.user.id,
-                                run_id=run_id,
-                            ),
-                            script,
-                            base_policy=agent.execution_policy,
+                        execution_context = SkillExecutionContext(
+                            agent_id=agent.id,
+                            conversation_id=conversation.id,
+                            workspace_id=conversation.workspace_id,
+                            user_id=request.user.id,
+                            run_id=run_id,
                         )
+                        if skill_uses_bundle(skill):
+                            result = await self.runner.execute_bundle_skill(
+                                skill,
+                                args,
+                                execution_context,
+                                base_policy=agent.execution_policy,
+                            )
+                        else:
+                            script = self.registry.read_skill_entrypoint(skill)
+                            result = await self.runner.execute_skill(
+                                skill,
+                                args,
+                                execution_context,
+                                script,
+                                base_policy=agent.execution_policy,
+                            )
                         execution = result.get("execution") if isinstance(result, dict) else None
                         if isinstance(execution, dict):
                             execution_id = execution.get("execution_id")

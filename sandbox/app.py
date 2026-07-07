@@ -526,6 +526,9 @@ async def execute_bundle(
     id: str | None = Form(None),
     params: str | None = Form(None),
     execution_policy: str | None = Form(None),
+    skill: str | None = Form(None),
+    context: str | None = Form(None),
+    base_policy: str | None = Form(None),
 ) -> JSONResponse:
     plugin_id = id.strip() if isinstance(id, str) and id.strip() else f"bundle_{uuid.uuid4().hex}"
     if not bundle.filename:
@@ -542,13 +545,66 @@ async def execute_bundle(
         return json_response({"error": "params must be a JSON object"}, 400)
 
     try:
+        parsed_skill = json.loads(skill) if skill else {}
+        parsed_context = json.loads(context) if context else {}
+        parsed_base_policy = json.loads(base_policy) if base_policy else None
         policy = json.loads(execution_policy) if execution_policy else None
     except json.JSONDecodeError:
-        return json_response({"error": "execution_policy must be valid JSON"}, 400)
+        return json_response({"error": "bundle form fields must be valid JSON"}, 400)
+    if skill is not None and not is_record(parsed_skill):
+        return json_response({"error": "skill must be a JSON object"}, 400)
+    if context is not None and not is_record(parsed_context):
+        return json_response({"error": "context must be a JSON object"}, 400)
 
     logger.info("Execute bundle request: plugin_id=%s, filename=%s", plugin_id, bundle.filename)
+    execution_id = make_execution_id()
+    started_at = time.monotonic()
+    merged_policy = merge_execution_policy(parsed_base_policy, policy)
+    if is_record(parsed_skill):
+        merged_policy = merge_execution_policy(merged_policy, parsed_skill.get("execution_policy"))
+    if is_record(parsed_context) and is_record(parsed_skill):
+        merged_policy = ensure_policy_venv_key(merged_policy, parsed_context, parsed_skill)
+    try:
+        secret_env, missing_secrets = resolve_required_secrets(parsed_skill.get("required_secrets") if is_record(parsed_skill) else None)
+    except RequestError as exc:
+        return json_response(exc.to_dict(), exc.status)
+    if missing_secrets:
+        return json_response(
+            {
+                "success": False,
+                "error": f"Missing required secret(s): {', '.join(missing_secrets)}",
+                "error_type": "missing_required_secrets",
+                "execution": build_skill_execution_metadata(
+                    execution_id=execution_id,
+                    context=parsed_context if is_record(parsed_context) else {},
+                    skill=parsed_skill if is_record(parsed_skill) else {},
+                    result={},
+                    started_at=started_at,
+                    policy=merged_policy,
+                ),
+            }
+        )
+    merged_env = dict(merged_policy.get("env") or {})
+    merged_env.setdefault("AGENT_RUNTIME_WORKSPACE_ID", str(parsed_context.get("workspace_id") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_CONVERSATION_ID", str(parsed_context.get("conversation_id") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_AGENT_ID", str(parsed_context.get("agent_id") or "default"))
+    merged_env.setdefault("AGENT_RUNTIME_RUN_ID", str(parsed_context.get("run_id") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_USER_ID", str(parsed_context.get("user_id") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_SKILL_NAME", str(parsed_skill.get("name") or ""))
+    merged_env.setdefault("AGENT_RUNTIME_ARTIFACTS_DIR", os.getenv("AGENT_RUNTIME_ARTIFACTS_DIR", "/app/artifacts"))
+    merged_env.update(secret_env)
+    merged_policy["env"] = merged_env
     async with execution_slot():
-        result = await run_bundle_execute(plugin_id, bundle_bytes, parsed_params, policy)
+        result = await run_bundle_execute(plugin_id, bundle_bytes, parsed_params, merged_policy)
+    if is_record(parsed_skill) and is_record(parsed_context):
+        result["execution"] = build_skill_execution_metadata(
+            execution_id=execution_id,
+            context=parsed_context,
+            skill=parsed_skill,
+            result=result,
+            started_at=started_at,
+            policy=merged_policy,
+        )
     return json_response(result, 200 if result.get("success") else 500)
 
 

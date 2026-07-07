@@ -12,6 +12,7 @@ from agent_runtime.config import AgentRuntimeSettings, load_settings
 from agent_runtime.models import ChatAttachment, ChatRequest, PermissionPolicy, SkillSummary, UserContext
 from agent_runtime.permissions import is_allowed
 from agent_runtime.registry import FileRegistry
+from agent_runtime.runner_client import build_skill_bundle, skill_uses_bundle
 from fastapi.testclient import TestClient
 from sandbox.runtime.models import ExecutionConfig
 from sandbox.runtime.process import cached_dependencies_match, write_dependency_marker
@@ -96,6 +97,66 @@ def test_registry_loads_executable_skill_summary_from_frontmatter(tmp_path):
         "capability_hints",
         "resources",
     }
+
+
+def test_skill_uses_bundle_when_directory_has_extra_files(tmp_path):
+    settings = make_settings(tmp_path)
+    write_skill(
+        settings.registry_dir / "skills" / "bundle-skill",
+        name="bundle-skill",
+        body="Read local resources when available.",
+        runtime_metadata="""  agent_runtime:
+    executable: true
+    entrypoint: skill.py
+    parameters_schema:
+      type: object
+      properties: {}
+      additionalProperties: false
+""",
+    )
+    skill_dir = settings.registry_dir / "skills" / "bundle-skill"
+    skill_dir.joinpath("skill.py").write_text(
+        "definition = {'name': 'bundle-skill'}\ndef execute(params):\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    skill_dir.joinpath("cases").mkdir(parents=True, exist_ok=True)
+    skill_dir.joinpath("cases", "sample.txt").write_text("sample case", encoding="utf-8")
+
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    skill = registry.skills["bundle-skill"]
+
+    assert skill_uses_bundle(skill) is True
+    bundle = build_skill_bundle(skill)
+    assert bundle
+
+
+def test_skill_uses_inline_when_only_entrypoint_exists(tmp_path):
+    settings = make_settings(tmp_path)
+    write_skill(
+        settings.registry_dir / "skills" / "inline-skill",
+        name="inline-skill",
+        body="Inline only.",
+        runtime_metadata="""  agent_runtime:
+    executable: true
+    entrypoint: skill.py
+    parameters_schema:
+      type: object
+      properties: {}
+      additionalProperties: false
+""",
+    )
+    skill_dir = settings.registry_dir / "skills" / "inline-skill"
+    skill_dir.joinpath("skill.py").write_text(
+        "definition = {'name': 'inline-skill'}\ndef execute(params):\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    skill = registry.skills["inline-skill"]
+
+    assert skill_uses_bundle(skill) is False
 
 
 def test_permissions_require_all_scopes():
@@ -289,6 +350,74 @@ def test_request_user_input_does_not_synthesize_missing_field_guidance(tmp_path)
     assert [field.name for field in response.requested_inputs] == ["primary_question", "depth", "scope"]
     assert [field.label for field in response.requested_inputs] == [None, None, None]
     assert [field.description for field in response.requested_inputs] == ["", "", ""]
+
+
+def test_runtime_executes_inline_skill_without_extra_resources(tmp_path):
+    settings = make_settings(tmp_path)
+    write_skill(
+        settings.registry_dir / "skills" / "inline-skill",
+        name="inline-skill",
+        body="Use inline execution.",
+        runtime_metadata="""  agent_runtime:
+    executable: true
+    entrypoint: skill.py
+    parameters_schema:
+      type: object
+      properties: {}
+      additionalProperties: false
+""",
+    )
+    skill_dir = settings.registry_dir / "skills" / "inline-skill"
+    skill_dir.joinpath("skill.py").write_text(
+        "definition = {'name': 'inline-skill'}\ndef execute(params):\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.runner = RecordingRunner()
+    runtime.openai = FakeOpenAI(tool_name="inline-skill", arguments={})
+
+    response = asyncio.run(runtime.chat(ChatRequest(message="run inline skill")))
+
+    assert response.message == "runtime 调用轮次超过上限，已停止。请缩小问题范围或提高 AGENT_RUNTIME_MAX_RUNTIME_ROUNDS。"
+    assert runtime.runner.calls
+    assert runtime.runner.calls[0]["mode"] == "inline"
+
+
+def test_runtime_executes_bundle_skill_when_extra_resources_exist(tmp_path):
+    settings = make_settings(tmp_path)
+    write_skill(
+        settings.registry_dir / "skills" / "bundle-skill",
+        name="bundle-skill",
+        body="Use bundle execution.",
+        runtime_metadata="""  agent_runtime:
+    executable: true
+    entrypoint: skill.py
+    parameters_schema:
+      type: object
+      properties: {}
+      additionalProperties: false
+""",
+    )
+    skill_dir = settings.registry_dir / "skills" / "bundle-skill"
+    skill_dir.joinpath("skill.py").write_text(
+        "definition = {'name': 'bundle-skill'}\ndef execute(params):\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    skill_dir.joinpath("cases").mkdir(parents=True, exist_ok=True)
+    skill_dir.joinpath("cases", "sample.txt").write_text("sample case", encoding="utf-8")
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.runner = RecordingRunner()
+    runtime.openai = FakeOpenAI(tool_name="bundle-skill", arguments={})
+
+    response = asyncio.run(runtime.chat(ChatRequest(message="run bundle skill")))
+
+    assert response.message == "runtime 调用轮次超过上限，已停止。请缩小问题范围或提高 AGENT_RUNTIME_MAX_RUNTIME_ROUNDS。"
+    assert runtime.runner.calls
+    assert runtime.runner.calls[0]["mode"] == "bundle"
 
 
 def test_chat_injects_attachment_context_as_separate_message(tmp_path):
@@ -891,6 +1020,36 @@ class CapturingFinalAnswerCompletions:
     async def create(self, **kwargs):
         self.last_kwargs = kwargs
         return FakeTextCompletion(self.content)
+
+
+class RecordingRunner:
+    def __init__(self):
+        self.calls = []
+
+    async def execute_skill(self, skill, arguments, context, script, *, base_policy=None):
+        self.calls.append(
+            {
+                "mode": "inline",
+                "skill": skill.name,
+                "arguments": arguments,
+                "context": context.model_dump(),
+                "script": script,
+                "base_policy": base_policy,
+            }
+        )
+        return {"success": True, "data": {"mode": "inline"}}
+
+    async def execute_bundle_skill(self, skill, arguments, context, *, base_policy=None):
+        self.calls.append(
+            {
+                "mode": "bundle",
+                "skill": skill.name,
+                "arguments": arguments,
+                "context": context.model_dump(),
+                "base_policy": base_policy,
+            }
+        )
+        return {"success": True, "data": {"mode": "bundle"}}
 
 
 class FakeAsyncStream:
