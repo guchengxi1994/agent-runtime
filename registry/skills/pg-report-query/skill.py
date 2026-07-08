@@ -1,6 +1,6 @@
 definition = {
     "name": "pg-report-query",
-    "description": "规划或执行 PostgreSQL 报表查询，用于生成结构化报告指标。",
+    "description": "规划或执行 PostgreSQL 报表查询，用于生成结构化案件分析报告指标。",
 }
 
 import os
@@ -35,7 +35,7 @@ DIMENSION_SPECS = {
     "risk_type": {
         "select": "COALESCE(NULLIF(case_type_sub2, ''), NULLIF(case_type_sub1, ''), case_category) AS risk_type",
         "alias": "risk_type",
-        "label": "风险类型",
+        "label": "案件事项类型",
         "kind": "category",
     },
     "event_source": {
@@ -179,6 +179,7 @@ def execute(params):
         "env": ["PG_DSN", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGPASSWORD"],
         "default_table": DEFAULT_TABLE,
         "bootstrap_skill": "pg-risk-dataset-sync",
+        "schema_skill": "pg-table-profile",
     }
 
     if execute_flag:
@@ -214,8 +215,21 @@ def execute(params):
                 "required_runtime_config": runtime_config,
             }
         try:
-            rows, columns = _execute_sql(planned_sql)
+            rows, columns, truncated = _execute_sql(planned_sql, max_rows=limit)
         except Exception as exc:
+            error_text = str(exc)
+            if _looks_like_missing_column(error_text):
+                return {
+                    "success": False,
+                    "mode": "schema_mismatch",
+                    "error_type": "schema_mismatch",
+                    "error": f"PostgreSQL query failed because the SQL referenced a missing column: {exc}",
+                    "sql": planned_sql,
+                    "dataset_status": dataset_status,
+                    "recommended_next_skill": "pg-table-profile",
+                    "recommended_next_action": "Inspect the live table schema and enum-like values, then rewrite the SQL with real column names.",
+                    "required_runtime_config": runtime_config,
+                }
             return {
                 "success": False,
                 "mode": "query_failed",
@@ -247,6 +261,8 @@ def execute(params):
             "row_count": len(rows),
             "columns": columns,
             "rows": rows,
+            "truncated": truncated,
+            "requested_limit": limit,
             "dataset_status": dataset_status,
             "top_n": resolved["top_n"],
             "order_by": resolved["order_by"],
@@ -256,6 +272,8 @@ def execute(params):
                 dimension_specs=resolved["dimension_specs"],
                 metric_specs=resolved["metric_specs"],
                 report_question=report_question,
+                truncated=truncated,
+                limit=limit,
             ),
             "chart_plan": resolved["chart_plan"],
             "chart_spec": chart_spec,
@@ -279,6 +297,7 @@ def execute(params):
         "order_direction": resolved["order_direction"],
         "chart_plan": resolved["chart_plan"],
         "planning_notes": resolved["planning_notes"],
+        "recommended_preflight_skill": "pg-table-profile",
     }
 
 
@@ -379,7 +398,7 @@ def _infer_dimensions(question):
         ("company_size", ["企业规模", "规模"]),
         ("org_form", ["组织形式"]),
         ("event_source", ["来源", "司法案件", "行政处罚", "司法与行政"]),
-        ("risk_type", ["风险类型", "案件类型", "子类"]),
+        ("risk_type", ["风险类型", "案件类型", "事项类型", "子类"]),
         ("case_category", ["案件大类"]),
         ("litigation_role_major", ["诉讼地位大类"]),
         ("litigation_role", ["诉讼地位"]),
@@ -786,26 +805,27 @@ def _pivot_rows(rows, *, x_field, series_field, value_field):
     return [buckets[item] for item in x_order], series_order
 
 
-def _summarize_rows(rows, dimension_specs, metric_specs, report_question):
+def _summarize_rows(rows, dimension_specs, metric_specs, report_question, truncated=False, limit=None):
     if not rows:
         return "未查询到匹配数据。"
     primary_metric = metric_specs[0] if metric_specs else {"alias": "value", "label": "数值"}
     metric_alias = primary_metric["alias"]
     metric_label = primary_metric["label"]
+    truncation_note = f" 结果已截断为前 {int(limit or len(rows))} 行预览。" if truncated else ""
     if not dimension_specs:
-        return f"{report_question or '查询结果'}：{metric_label}为 {rows[0].get(metric_alias)}。"
+        return f"{report_question or '查询结果'}：{metric_label}为 {rows[0].get(metric_alias)}。{truncation_note}".strip()
     first_dimension = dimension_specs[0]
     if len(dimension_specs) == 1:
         leader = rows[0]
         return (
             f"共返回 {len(rows)} 个分组；排名第一的{first_dimension['label']}是 "
-            f"{leader.get(first_dimension['alias']) or '未命名'}，{metric_label}为 {leader.get(metric_alias)}。"
+            f"{leader.get(first_dimension['alias']) or '未命名'}，{metric_label}为 {leader.get(metric_alias)}。{truncation_note}"
         )
     leader = rows[0]
     second_dimension = dimension_specs[1]
     return (
         f"共返回 {len(rows)} 行交叉结果；首行对应 {first_dimension['label']}={leader.get(first_dimension['alias'])}，"
-        f"{second_dimension['label']}={leader.get(second_dimension['alias'])}，{metric_label}为 {leader.get(metric_alias)}。"
+        f"{second_dimension['label']}={leader.get(second_dimension['alias'])}，{metric_label}为 {leader.get(metric_alias)}。{truncation_note}"
     )
 
 
@@ -829,6 +849,11 @@ def _validate_read_only_sql(sql):
     return None
 
 
+def _looks_like_missing_column(error_text):
+    normalized = str(error_text or "").lower()
+    return 'column "' in normalized and "does not exist" in normalized
+
+
 def _dataset_status():
     with _connect_postgres() as conn:
         with conn.cursor() as cur:
@@ -842,13 +867,16 @@ def _dataset_status():
             return {"table_exists": True, "row_count": int(row[0] or 0), "table_name": DEFAULT_TABLE}
 
 
-def _execute_sql(sql):
+def _execute_sql(sql, max_rows=DEFAULT_LIMIT):
+    capped = max(1, min(int(max_rows or DEFAULT_LIMIT), MAX_LIMIT))
     with _connect_postgres() as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
             columns = [item.name for item in cur.description or []]
-            rows = [_json_safe_row(dict(zip(columns, row))) for row in cur.fetchall()]
-            return rows, columns
+            fetched = cur.fetchmany(capped + 1)
+            truncated = len(fetched) > capped
+            rows = [_json_safe_row(dict(zip(columns, row))) for row in fetched[:capped]]
+            return rows, columns, truncated
 
 
 def _connect_postgres():

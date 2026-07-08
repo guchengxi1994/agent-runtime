@@ -1,10 +1,12 @@
 {
   "id": "enterprise_risk_report_analyst",
-  "name": "企业风险报告分析助手",
-  "description": "基于数据库指标、精选案例证据和图表化输出生成结构化企业法律风险与治理分析报告。",
+  "name": "企业涉法涉诉案件分析助手",
+  "description": "基于数据库指标、精选案例证据和图表化输出生成结构化企业涉法涉诉案件分析报告。",
   "enabled": true,
   "skill_ids": [
     "enterprise-risk-report",
+    "enterprise-risk-report-writer",
+    "pg-table-profile",
     "pg-risk-dataset-sync",
     "case-library-review",
     "pg-case-search",
@@ -16,8 +18,10 @@
   ],
   "capability_hints": [
     "结构化报告生成",
+    "正式成稿写作",
+    "PostgreSQL 表结构探查",
     "PostgreSQL 数据初始化",
-    "法律风险分析",
+    "涉法涉诉案件分析",
     "图表化报告输出",
     "数据库优先的案例检索"
   ]

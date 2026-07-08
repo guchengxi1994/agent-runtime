@@ -9,7 +9,7 @@ from pathlib import Path
 
 definition = {
     "name": "pg-risk-dataset-sync",
-    "description": "同步企业风险结构化数据到 PostgreSQL，并保证幂等导入。",
+    "description": "同步企业涉法涉诉案件结构化数据到 PostgreSQL，并保证幂等导入。",
 }
 
 

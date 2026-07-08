@@ -695,6 +695,7 @@ class AgentRuntime:
             "content": content,
             "reasoning_text": reasoning_text,
             "tool_calls": tool_calls,
+            "usage": self._extract_usage_payload(completion),
         }
 
     async def _complete_model_turn_stream(
@@ -710,8 +711,12 @@ class AgentRuntime:
         reasoning_parts: list[str] = []
         tool_call_parts: dict[int, dict[str, Any]] = {}
         reasoning_redacted_emitted = False
+        usage_payload: dict[str, Any] | None = None
 
         async for chunk in stream:
+            usage_candidate = self._extract_usage_payload(chunk)
+            if usage_candidate:
+                usage_payload = usage_candidate
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -821,6 +826,7 @@ class AgentRuntime:
             "content": content,
             "reasoning_text": reasoning_text,
             "tool_calls": tool_calls,
+            "usage": usage_payload,
         }
 
     @staticmethod
@@ -848,6 +854,9 @@ class AgentRuntime:
             "reasoning_content_available": bool(reasoning_text),
             "reasoning_content_exposed": bool(reasoning_text and self.settings.expose_reasoning_content),
         }
+        usage_payload = model_turn.get("usage")
+        if isinstance(usage_payload, dict) and usage_payload:
+            response["usage"] = usage_payload
         if reasoning_text:
             response["reasoning_content"] = (
                 reasoning_text
@@ -855,6 +864,20 @@ class AgentRuntime:
                 else "[redacted by AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=false]"
             )
         return response
+
+    @staticmethod
+    def _extract_usage_payload(value: Any) -> dict[str, Any] | None:
+        usage = getattr(value, "usage", None)
+        if usage is None and isinstance(value, dict):
+            usage = value.get("usage")
+        if usage is None:
+            return None
+        if isinstance(usage, dict):
+            return AgentRuntime._json_snapshot(usage)
+        if hasattr(usage, "model_dump"):
+            dumped = usage.model_dump(exclude_none=True)
+            return dumped if isinstance(dumped, dict) and dumped else None
+        return None
 
     @staticmethod
     def _extract_delta_string(delta: Any, delta_payload: dict[str, Any], key: str) -> str:
@@ -1218,6 +1241,27 @@ class AgentRuntime:
             if isinstance(data.get("rows"), list):
                 observation["row_count"] = len(data["rows"])
                 observation["rows_preview"] = AgentRuntime._preview_rows(data["rows"], limit=5)
+                if isinstance(data.get("truncated"), bool):
+                    observation["truncated"] = data.get("truncated")
+                if data.get("requested_limit") is not None:
+                    observation["requested_limit"] = data.get("requested_limit")
+            if isinstance(data.get("dimension_candidates"), list):
+                observation["dimension_candidates"] = [str(item) for item in data.get("dimension_candidates")[:12]]
+            if isinstance(data.get("time_candidates"), list):
+                observation["time_candidates"] = [str(item) for item in data.get("time_candidates")[:8]]
+            if isinstance(data.get("filterable_enums"), dict):
+                enum_preview = {}
+                for index, (key, value) in enumerate(data.get("filterable_enums").items()):
+                    if index >= 6:
+                        break
+                    if isinstance(value, list):
+                        enum_preview[str(key)] = [str(item) for item in value[:8]]
+                if enum_preview:
+                    observation["enum_preview"] = enum_preview
+            if data.get("schema_overview"):
+                observation["schema_overview"] = AgentRuntime._compact_text(str(data.get("schema_overview")), 900)
+            elif data.get("llm_context"):
+                observation["schema_overview"] = AgentRuntime._compact_text(str(data.get("llm_context")), 900)
             if isinstance(data.get("chart_spec"), dict):
                 chart_spec = data["chart_spec"]
                 observation["chart_renderer"] = chart_spec.get("renderer")

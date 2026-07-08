@@ -148,7 +148,7 @@ def _sql_quote(value):
 def _build_sql(query, tags, filters, sort_by, limit):
     where_parts = []
     assumptions = [
-        f"Assume a PostgreSQL table named {DEFAULT_TABLE} that stores structured enterprise risk events.",
+        f"Assume a PostgreSQL table named {DEFAULT_TABLE} that stores structured enterprise legal/litigation cases and administrative penalty records.",
     ]
 
     if query:

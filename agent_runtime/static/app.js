@@ -7,6 +7,30 @@ const state = {
 const $ = (id) => document.getElementById(id);
 const CHART_RENDERER_STORAGE_KEY = "agent_runtime_chart_renderer";
 const CHART_COLORS = ["#0f766e", "#2563eb", "#ea580c", "#7c3aed", "#dc2626", "#0891b2", "#65a30d", "#4f46e5"];
+const CHART_LABEL_MAP = {
+  case_count: "案件数量",
+  record_count: "记录数量",
+  company_count: "涉及企业数量",
+  judicial_case_count: "司法案件数量",
+  administrative_penalty_count: "行政处罚数量",
+  share_percent: "占比",
+  risk_type: "案件事项类型",
+  case_category: "案件大类",
+  case_type_sub1: "案件子类一",
+  case_type_sub2: "案件子类二",
+  event_source: "事件来源",
+  month: "月份",
+  year: "年份",
+  region: "属地",
+  industry: "行业",
+  company_name: "企业名称",
+  ownership_nature: "所有权性质",
+  org_form: "组织形式",
+  judicial_case: "司法案件",
+  administrative_penalty: "行政处罚",
+  total: "总量",
+  count: "数量",
+};
 
 function normalizeChartRenderer(value) {
   const normalized = String(value || "").trim().toLowerCase();
@@ -285,10 +309,12 @@ function updateAssistantMessage(item, text, steps = [], requestedInputs = [], li
   const bubble = item.querySelector(".bubble");
   const body = item.querySelector(".message-body");
   disposeCharts(body);
+  const reportLike = isReportLikeResponse(text);
   bubble.innerHTML = renderMarkdown(text);
   for (const existing of body.querySelectorAll(".live-stream, .requested-inputs, .run-log, .tool-results")) {
     existing.remove();
   }
+  const hiddenChartIndexes = injectInlineCharts(bubble, toolCalls);
   if (liveStream) {
     body.insertAdjacentHTML("beforeend", renderLiveStream(liveStream));
   }
@@ -296,7 +322,7 @@ function updateAssistantMessage(item, text, steps = [], requestedInputs = [], li
     body.insertAdjacentHTML("beforeend", renderRequestedInputs(requestedInputs));
   }
   if (toolCalls.length) {
-    const toolResultsHtml = renderToolResults(toolCalls);
+    const toolResultsHtml = renderToolResults(toolCalls, { reportLike, hiddenChartIndexes });
     if (toolResultsHtml) {
       body.insertAdjacentHTML("beforeend", toolResultsHtml);
       hydrateToolResults(body, toolCalls);
@@ -394,10 +420,11 @@ function renderRequestedInputs(inputs) {
 function renderRunLog(steps) {
   const toolSteps = steps.filter((step) => step.kind === "sandbox_execution");
   const waitingStep = steps.find((step) => step.kind === "waiting_for_user");
+  const uniqueToolLabels = Array.from(new Set(toolSteps.map((step) => step.label).filter(Boolean)));
   const statusText = waitingStep
     ? "等待用户输入"
     : toolSteps.length
-      ? `使用工具 ${toolSteps.map((step) => step.label).join(", ")}`
+      ? `已执行 ${toolSteps.length} 次工具调用${uniqueToolLabels.length ? `，涉及 ${uniqueToolLabels.slice(0, 3).join("、")}${uniqueToolLabels.length > 3 ? " 等" : ""}` : ""}`
       : "未执行 sandbox 工具";
   const summaryClass = toolSteps.length ? "used-tool" : waitingStep ? "waiting" : "no-tool";
   const rows = steps
@@ -495,21 +522,270 @@ function extractToolResults(toolCalls) {
   return { charts, tables };
 }
 
-function renderToolResults(toolCalls) {
+function normalizeChartTitle(value) {
+  return String(value || "")
+    .replace(/\s*(?:（|\()?\s*(?:饼图|折线图|柱状图|堆叠柱状图|前\d+位|top\s*\d+)\s*(?:）|\))?\s*$/gi, "")
+    .toLowerCase()
+    .replace(/[\s\u3000]+/g, "")
+    .replace(/[：:，,。．.、()[\]{}（）【】"'`“”‘’\-_/]/g, "");
+}
+
+function localizeChartLabel(value, fallback = "") {
+  const source = String(value ?? "").trim();
+  if (!source) {
+    return fallback;
+  }
+  if (/[\u4e00-\u9fff]/.test(source)) {
+    return source;
+  }
+  const normalized = source.toLowerCase();
+  return CHART_LABEL_MAP[normalized] || source;
+}
+
+function parseInlineChartMarker(text) {
+  const source = String(text || "").replace(/\s+/g, " ").trim();
+  if (!source) {
+    return null;
+  }
+  const explicitMatch = source.match(/\[\[chart:(.+?)\]\]/i);
+  if (explicitMatch) {
+    const rawTarget = explicitMatch[1].trim();
+    const numericMatch = rawTarget.match(/^\d+$/);
+    return {
+      type: "explicit",
+      raw: explicitMatch[0],
+      chartIndex: numericMatch ? Math.max(0, Number(rawTarget) - 1) : null,
+      title: numericMatch ? "" : rawTarget,
+    };
+  }
+  const figureMatch = source.match(/^图\s*(\d+)\s*(?:[：:]\s*|\s+)(.+)$/);
+  if (!figureMatch) {
+    return null;
+  }
+  return {
+    type: "figure",
+    raw: figureMatch[0],
+    chartIndex: Math.max(0, Number(figureMatch[1]) - 1),
+    title: figureMatch[2].trim(),
+  };
+}
+
+function resolveInlineChartIndex(marker, charts, usedIndexes) {
+  if (!marker || !Array.isArray(charts) || !charts.length) {
+    return null;
+  }
+  const titleKey = normalizeChartTitle(marker.title || "");
+  if (titleKey) {
+    const matchedByTitle = charts.findIndex((chart, index) => {
+      if (usedIndexes.has(index)) {
+        return false;
+      }
+      const chartKey = normalizeChartTitle(chart.title || "");
+      return chartKey && (chartKey.includes(titleKey) || titleKey.includes(chartKey));
+    });
+    if (matchedByTitle >= 0) {
+      return matchedByTitle;
+    }
+  }
+  if (Number.isInteger(marker.chartIndex) && marker.chartIndex >= 0 && marker.chartIndex < charts.length && !usedIndexes.has(marker.chartIndex)) {
+    return marker.chartIndex;
+  }
+  if (titleKey) {
+    const fuzzyMatch = charts.findIndex((chart, index) => {
+      if (usedIndexes.has(index)) {
+        return false;
+      }
+      const chartKey = normalizeChartTitle(chart.title || "");
+      return chartKey && (chartKey.startsWith(titleKey) || titleKey.startsWith(chartKey));
+    });
+    if (fuzzyMatch >= 0) {
+      return fuzzyMatch;
+    }
+  }
+  return null;
+}
+
+function cleanupExplicitChartMarker(node, marker) {
+  if (!node || !marker || !marker.raw) {
+    return;
+  }
+  node.innerHTML = node.innerHTML.replace(marker.raw, "").trim();
+}
+
+function isChartSpecCodeBlock(node) {
+  const codeNode = node?.querySelector("pre code");
+  if (!codeNode) {
+    return false;
+  }
+  const source = String(codeNode.textContent || "").trim();
+  if (!source.startsWith("{")) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(source);
+    return Boolean(
+      parsed &&
+        typeof parsed === "object" &&
+        (parsed.option || parsed.chart_type || parsed.renderer || parsed.title),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function cleanupInlineChartSpecs(root) {
+  for (const block of root.querySelectorAll(".code-block")) {
+    if (!isChartSpecCodeBlock(block)) {
+      continue;
+    }
+    const previous = block.previousElementSibling;
+    const next = block.nextElementSibling;
+    const adjacentInlineChart = [previous, next].some((node) => node?.classList?.contains("markdown-inline-chart"));
+    if (adjacentInlineChart) {
+      block.remove();
+    }
+  }
+}
+
+function injectInlineCharts(root, toolCalls) {
+  const { charts } = extractToolResults(toolCalls);
+  if (!charts.length) {
+    return new Set();
+  }
+  const usedIndexes = new Set();
+  const anchors = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, p, li"));
+  for (const anchor of anchors) {
+    if (anchor.nextElementSibling?.classList?.contains("markdown-inline-chart")) {
+      continue;
+    }
+    const marker = parseInlineChartMarker(anchor.textContent || "");
+    if (!marker) {
+      continue;
+    }
+    const chartIndex = resolveInlineChartIndex(marker, charts, usedIndexes);
+    if (chartIndex == null) {
+      continue;
+    }
+    const removeEmptyAnchor = marker.type === "explicit";
+    if (marker.type === "explicit") {
+      cleanupExplicitChartMarker(anchor, marker);
+    }
+    const wrapper = document.createElement("div");
+    wrapper.className = "markdown-inline-chart";
+    wrapper.innerHTML = `<div class="chart-canvas" data-chart-index="${chartIndex}"></div>`;
+    anchor.insertAdjacentElement("afterend", wrapper);
+    if (removeEmptyAnchor && !anchor.textContent.trim()) {
+      anchor.remove();
+    }
+    usedIndexes.add(chartIndex);
+  }
+  if (usedIndexes.size) {
+    cleanupInlineChartSpecs(root);
+  }
+  return usedIndexes;
+}
+
+function isReportLikeResponse(text) {
+  const source = String(text || "");
+  if (source.length < 900) {
+    return false;
+  }
+  return (
+    (source.includes("报告") || source.includes("执行摘要") || source.includes("治理建议")) &&
+    (/[一二三四五六七八九十]+、/.test(source) || /(?:^|\n)##?\s*[一二三四五六七八九十]+[、.]/m.test(source))
+  );
+}
+
+function isTechnicalResultTable(table) {
+  const source = `${table.title || ""} ${table.summary || ""} ${table.columns.join(" ")}`.toLowerCase();
+  return /完整列名|关键字段|表结构|schema|列名|字段|enterprise_risk_events|source table/.test(source);
+}
+
+function localizeChartType(chartType) {
+  const normalized = String(chartType || "").trim().toLowerCase();
+  return (
+    {
+      line: "折线图",
+      bar: "柱状图",
+      stacked_bar: "堆叠柱状图",
+      pie: "饼图",
+      heatmap: "热力图",
+      chart: "图表",
+    }[normalized] || "图表"
+  );
+}
+
+function renderTableCard(table, options = {}) {
+  const reportLike = Boolean(options.reportLike);
+  const limitedRows = table.rows.slice(0, 12);
+  const head = table.columns.map((column) => `<th>${escapeText(column)}</th>`).join("");
+  const body = limitedRows
+    .map(
+      (row) =>
+        `<tr>${table.columns
+          .map((column) => `<td>${renderInlineMarkdown(String(row[column] ?? ""))}</td>`)
+          .join("")}</tr>`,
+    )
+    .join("");
+  const footer =
+    table.rows.length > limitedRows.length
+      ? `<p class="chart-meta">仅展示前 ${limitedRows.length} 行，共 ${table.rowCount || table.rows.length} 行。</p>`
+      : `<p class="chart-meta">共 ${table.rowCount || table.rows.length} 行。</p>`;
+  return `
+    <article class="tool-card">
+      <div class="tool-card-head">
+        <div>
+          <strong>${escapeText(table.title || "查询结果")}</strong>
+          ${reportLike ? "" : `<span>${escapeText(table.toolName)}</span>`}
+        </div>
+        <span class="tool-result-badge">${escapeText(`${table.rowCount || table.rows.length} 行`)}</span>
+      </div>
+      <div class="tool-card-body">
+        ${table.summary ? `<p class="tool-card-summary">${escapeText(table.summary)}</p>` : ""}
+        <div class="tool-result-table-wrap">
+          <table class="tool-result-table">
+            <thead><tr>${head}</tr></thead>
+            <tbody>${body}</tbody>
+          </table>
+        </div>
+        ${footer}
+      </div>
+    </article>
+  `;
+}
+
+function renderDisclosure(label, description, content) {
+  return `
+    <details class="tool-results-disclosure">
+      <summary>
+        <span>${escapeText(label)}</span>
+        <strong>${escapeText(description)}</strong>
+      </summary>
+      <div class="tool-results-disclosure-body">${content}</div>
+    </details>
+  `;
+}
+
+function renderToolResults(toolCalls, options = {}) {
   const { charts, tables } = extractToolResults(toolCalls);
   if (!charts.length && !tables.length) {
     return "";
   }
-  const chartHtml = charts
+  const reportLike = Boolean(options.reportLike);
+  const hiddenChartIndexes = options.hiddenChartIndexes instanceof Set ? options.hiddenChartIndexes : new Set();
+  const visibleCharts = charts
+    .map((chart, index) => ({ chart, index }))
+    .filter(({ index }) => !hiddenChartIndexes.has(index));
+  const chartHtml = visibleCharts
     .map(
-      (chart, index) => `
-        <article class="tool-card">
+      ({ chart, index }) => `
+        <article class="tool-card" data-report-like="${reportLike ? "1" : "0"}">
           <div class="tool-card-head">
             <div>
               <strong>${escapeText(chart.title || "图表")}</strong>
-              <span>${escapeText(chart.toolName)}</span>
+              ${reportLike ? "" : `<span>${escapeText(chart.toolName)}</span>`}
             </div>
-            <span class="tool-result-badge">${escapeText(chart.chartType || "chart")}</span>
+            <span class="tool-result-badge">${escapeText(localizeChartType(chart.chartType || "chart"))}</span>
           </div>
           <div class="tool-card-body">
             ${chart.summary ? `<p class="tool-card-summary">${escapeText(chart.summary)}</p>` : ""}
@@ -520,50 +796,32 @@ function renderToolResults(toolCalls) {
       `,
     )
     .join("");
-  const tableHtml = tables
-    .map((table) => {
-      const limitedRows = table.rows.slice(0, 12);
-      const head = table.columns.map((column) => `<th>${escapeText(column)}</th>`).join("");
-      const body = limitedRows
-        .map(
-          (row) =>
-            `<tr>${table.columns
-              .map((column) => `<td>${renderInlineMarkdown(String(row[column] ?? ""))}</td>`)
-              .join("")}</tr>`,
-        )
-        .join("");
-      const footer =
-        table.rows.length > limitedRows.length
-          ? `<p class="chart-meta">仅展示前 ${limitedRows.length} 行，共 ${table.rowCount || table.rows.length} 行。</p>`
-          : `<p class="chart-meta">共 ${table.rowCount || table.rows.length} 行。</p>`;
-      return `
-        <article class="tool-card">
-          <div class="tool-card-head">
-            <div>
-              <strong>${escapeText(table.title || "查询结果")}</strong>
-              <span>${escapeText(table.toolName)}</span>
-            </div>
-            <span class="tool-result-badge">${escapeText(`${table.rowCount || table.rows.length} rows`)}</span>
-          </div>
-          <div class="tool-card-body">
-            ${table.summary ? `<p class="tool-card-summary">${escapeText(table.summary)}</p>` : ""}
-            <div class="tool-result-table-wrap">
-              <table class="tool-result-table">
-                <thead><tr>${head}</tr></thead>
-                <tbody>${body}</tbody>
-              </table>
-            </div>
-            ${footer}
-          </div>
-        </article>
-      `;
-    })
-    .join("");
+  const visibleTables = reportLike ? tables.filter((table) => !isTechnicalResultTable(table)) : tables;
+  const technicalTables = reportLike ? tables.filter((table) => isTechnicalResultTable(table)) : [];
+  const tableHtml = visibleTables.map((table) => renderTableCard(table, { reportLike })).join("");
+  const technicalTableHtml = technicalTables.map((table) => renderTableCard(table, { reportLike })).join("");
+  if (!visibleCharts.length && !visibleTables.length && !technicalTables.length) {
+    return "";
+  }
 
   return `
     <section class="tool-results" aria-label="结构化结果">
-      ${charts.length ? `<div class="tool-result-group"><div class="tool-result-heading">图表结果</div>${chartHtml}</div>` : ""}
-      ${tables.length ? `<div class="tool-result-group"><div class="tool-result-heading">查询结果</div>${tableHtml}</div>` : ""}
+      ${visibleCharts.length ? `<div class="tool-result-group"><div class="tool-result-heading">图表结果</div>${chartHtml}</div>` : ""}
+      ${
+        !reportLike && visibleTables.length
+          ? `<div class="tool-result-group"><div class="tool-result-heading">查询结果</div>${tableHtml}</div>`
+          : ""
+      }
+      ${
+        reportLike && visibleTables.length
+          ? `<div class="tool-result-group"><div class="tool-result-heading">分析明细</div>${renderDisclosure("分析明细", `共 ${visibleTables.length} 组数据结果，可展开核对`, tableHtml)}</div>`
+          : ""
+      }
+      ${
+        reportLike && technicalTables.length
+          ? `<div class="tool-result-group"><div class="tool-result-heading">技术明细</div>${renderDisclosure("技术明细", `共 ${technicalTables.length} 组，通常可忽略`, technicalTableHtml)}</div>`
+          : ""
+      }
     </section>
   `;
 }
@@ -614,7 +872,7 @@ function buildChartLegend(series) {
           (item) => `
             <span class="chart-legend-item">
               <span class="chart-swatch" style="background:${item.color};"></span>
-              <span>${escapeText(item.name || "系列")}</span>
+              <span>${escapeText(localizeChartLabel(item.name, "系列"))}</span>
             </span>
           `,
         )
@@ -633,7 +891,7 @@ function buildTailwindChartModel(chart) {
     const pieSeries = Array.isArray(option.series) ? option.series[0] : null;
     const segments = Array.isArray(pieSeries?.data)
       ? pieSeries.data.map((item, index) => ({
-          name: String(item?.name || `分类 ${index + 1}`),
+          name: localizeChartLabel(item?.name, `分类 ${index + 1}`),
           value: normalizeChartValue(item?.value),
           color: CHART_COLORS[index % CHART_COLORS.length],
         }))
@@ -658,10 +916,12 @@ function buildTailwindChartModel(chart) {
     return null;
   }
   const pointCount = Math.max(categories.length, ...rawSeries.map((item) => (Array.isArray(item?.data) ? item.data.length : 0)));
-  const normalizedCategories = Array.from({ length: pointCount }, (_, index) => String(categories[index] ?? index + 1));
+  const normalizedCategories = Array.from({ length: pointCount }, (_, index) =>
+    localizeChartLabel(categories[index], String(categories[index] ?? index + 1)),
+  );
   const series = rawSeries
     .map((item, index) => ({
-      name: String(item?.name || `系列 ${index + 1}`),
+      name: localizeChartLabel(item?.name, `系列 ${index + 1}`),
       values: Array.from({ length: pointCount }, (_, itemIndex) =>
         normalizeChartValue(Array.isArray(item?.data) ? item.data[itemIndex] : 0),
       ),
@@ -742,10 +1002,10 @@ function renderTailwindBarChart(model) {
           return `
             <div class="chart-bar-column">
               ${showValueLabels ? `<span class="chart-bar-value">${escapeText(formatMetric(value))}</span>` : ""}
-              <div
-                class="chart-bar"
-                style="height:${height}%;background:${series.color};"
-                title="${escapeText(`${series.name} · ${category}: ${value}`)}"
+            <div
+              class="chart-bar"
+              style="height:${height}%;background:${series.color};"
+              title="${escapeText(`${localizeChartLabel(series.name, "系列")} · ${localizeChartLabel(category, category)}: ${value}`)}"
               ></div>
             </div>
           `;
@@ -795,7 +1055,7 @@ function renderTailwindStackedBarChart(model) {
             <div
               class="chart-bar-segment"
               style="height:${segmentHeight}%;background:${series.color};"
-              title="${escapeText(`${series.name} · ${category}: ${value}`)}"
+              title="${escapeText(`${localizeChartLabel(series.name, "系列")} · ${localizeChartLabel(category, category)}: ${value}`)}"
             ></div>
           `;
         })
@@ -866,7 +1126,7 @@ function renderTailwindLineChart(model) {
         .map(
           (point, index) => `
             <circle cx="${point.x}" cy="${point.y}" r="4" fill="${series.color}">
-              <title>${escapeText(`${series.name} · ${model.categories[index]}: ${series.values[index]}`)}</title>
+              <title>${escapeText(`${localizeChartLabel(series.name, "系列")} · ${localizeChartLabel(model.categories[index], model.categories[index])}: ${series.values[index]}`)}</title>
             </circle>
           `,
         )
@@ -938,7 +1198,7 @@ function renderTailwindPieChart(model) {
         <div class="chart-pie-wrap">
           <div class="chart-pie" style="background:conic-gradient(${gradient});">
             <div class="chart-pie-hole">
-              <div class="chart-pie-caption">Total</div>
+              <div class="chart-pie-caption">总量</div>
               <div class="chart-pie-total">${escapeText(formatMetric(model.total))}</div>
             </div>
           </div>
@@ -971,12 +1231,63 @@ function renderTailwindChart(container, chart) {
   return true;
 }
 
+function cloneChartOptionWithLocalizedText(option) {
+  if (!option || typeof option !== "object") {
+    return option;
+  }
+  let cloned = option;
+  try {
+    cloned = JSON.parse(JSON.stringify(option));
+  } catch {
+    return option;
+  }
+  const xAxes = Array.isArray(cloned.xAxis) ? cloned.xAxis : cloned.xAxis ? [cloned.xAxis] : [];
+  for (const axis of xAxes) {
+    if (Array.isArray(axis?.data)) {
+      axis.data = axis.data.map((item) => localizeChartLabel(item, String(item ?? "")));
+    }
+    if (typeof axis?.name === "string") {
+      axis.name = localizeChartLabel(axis.name, axis.name);
+    }
+  }
+  const yAxes = Array.isArray(cloned.yAxis) ? cloned.yAxis : cloned.yAxis ? [cloned.yAxis] : [];
+  for (const axis of yAxes) {
+    if (typeof axis?.name === "string") {
+      axis.name = localizeChartLabel(axis.name, axis.name);
+    }
+  }
+  if (cloned.legend && Array.isArray(cloned.legend.data)) {
+    cloned.legend.data = cloned.legend.data.map((item) => localizeChartLabel(item, String(item ?? "")));
+  }
+  if (Array.isArray(cloned.series)) {
+    cloned.series = cloned.series.map((series) => {
+      const nextSeries = { ...series };
+      if (typeof nextSeries.name === "string") {
+        nextSeries.name = localizeChartLabel(nextSeries.name, nextSeries.name);
+      }
+      if (Array.isArray(nextSeries.data)) {
+        nextSeries.data = nextSeries.data.map((item, index) => {
+          if (item && typeof item === "object" && !Array.isArray(item)) {
+            return {
+              ...item,
+              name: localizeChartLabel(item.name, item.name || `分类 ${index + 1}`),
+            };
+          }
+          return item;
+        });
+      }
+      return nextSeries;
+    });
+  }
+  return cloned;
+}
+
 function renderEchartsChart(container, chart) {
   if (!window.echarts || !chart.option) {
     return false;
   }
   const instance = window.echarts.init(container, null, { renderer: "canvas" });
-  instance.setOption(chart.option);
+  instance.setOption(cloneChartOptionWithLocalizedText(chart.option));
   const resize = () => instance.resize();
   if (window.ResizeObserver) {
     const observer = new ResizeObserver(resize);
@@ -1008,14 +1319,18 @@ function hydrateToolResults(body, toolCalls) {
   if (!charts.length) {
     return;
   }
-  const containers = Array.from(body.querySelectorAll(".chart-canvas"));
-  const metaNodes = Array.from(body.querySelectorAll("[data-chart-meta-index]"));
-  containers.forEach((container, index) => {
-    const chart = charts[index];
-    const meta = metaNodes[index];
+  const containers = Array.from(body.querySelectorAll(".chart-canvas[data-chart-index]"));
+  containers.forEach((container) => {
+    const chartIndex = Number(container.dataset.chartIndex);
+    if (!Number.isInteger(chartIndex) || chartIndex < 0) {
+      return;
+    }
+    const chart = charts[chartIndex];
+    const meta = body.querySelector(`[data-chart-meta-index="${chartIndex}"]`);
     if (!chart) {
       return;
     }
+    const reportLike = container.closest(".tool-card")?.dataset.reportLike === "1";
     disposeChartContainer(container);
     const renderer = resolveChartRenderer(chart);
     if (renderer === "tailwind") {
@@ -1026,7 +1341,7 @@ function hydrateToolResults(body, toolCalls) {
       container.innerHTML = `<div class="chart-empty">当前结果缺少可渲染的图表规格。</div>`;
     }
     if (meta) {
-      meta.textContent = buildChartMeta(chart, renderer);
+      meta.textContent = reportLike ? "" : buildChartMeta(chart, renderer);
     }
   });
 }

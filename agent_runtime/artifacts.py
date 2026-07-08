@@ -107,6 +107,7 @@ class ArtifactStore:
         summary = summarize_result(result)
         status = "failed" if effective_success(result) is False else "completed"
         title = f"{tool_name} output"
+        stats = build_tool_artifact_stats(arguments, result)
         return self._write_workspace_artifact(
             workspace_id=workspace_id,
             conversation_id=conversation_id,
@@ -119,6 +120,7 @@ class ArtifactStore:
             summary=summary,
             status=status,
             tags=tags or [],
+            stats=stats,
             content={"arguments": arguments, "result": result},
         )
 
@@ -133,6 +135,7 @@ class ArtifactStore:
         response: dict[str, Any],
     ) -> ArtifactRecord:
         summary = summarize_model_trace(round_index, request, response)
+        stats = build_model_artifact_stats(request, response)
         return self._write_workspace_artifact(
             workspace_id=workspace_id,
             conversation_id=conversation_id,
@@ -145,6 +148,7 @@ class ArtifactStore:
             summary=summary,
             status="completed",
             tags=["planning"],
+            stats=stats,
             content={"round_index": round_index, "request": request, "response": response},
         )
 
@@ -171,6 +175,7 @@ class ArtifactStore:
             summary=trim(summary or title),
             status="completed",
             tags=tags or [],
+            stats={"payload_chars": json_char_count(payload)},
             content={"payload": payload},
         )
 
@@ -227,6 +232,7 @@ class ArtifactStore:
             "conversation_id": entry.get("conversation_id"),
             "artifact_id": artifact_id,
             "summary": entry.get("summary", ""),
+            "stats": entry.get("stats") or payload.get("stats") or {},
             "content": content[:max_chars],
             "truncated": truncated,
             "total_chars": len(content),
@@ -266,6 +272,7 @@ class ArtifactStore:
         summary: str,
         status: str,
         tags: list[str],
+        stats: dict[str, Any] | None,
         content: dict[str, Any],
     ) -> ArtifactRecord:
         workspace_id = sanitize_id(workspace_id)
@@ -290,6 +297,7 @@ class ArtifactStore:
             "summary": trim(summary),
             "status": status,
             "tags": [str(tag).strip() for tag in tags if str(tag).strip()],
+            "stats": stats or {},
             "content": content,
         }
         artifact_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
@@ -307,6 +315,7 @@ class ArtifactStore:
             "summary": payload["summary"],
             "status": status,
             "tags": payload["tags"],
+            "stats": payload["stats"],
             "relative_path": relative_path,
         }
         manifest.append(entry)
@@ -386,6 +395,8 @@ class ArtifactStore:
             )
             lines.append(f"  - title: {item.get('title', '')}")
             lines.append(f"  - summary: {item.get('summary', '')}")
+            if item.get("stats"):
+                lines.append(f"  - stats: {format_stats_inline(item.get('stats') or {})}")
             lines.append(f"  - path: {item.get('relative_path', '')}")
         (self._workspace_root(workspace_id) / "manifest.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -535,19 +546,35 @@ def summarize_result(result: dict[str, Any]) -> str:
         return trim(f"Failed: {result_error_message(result) or 'Tool failed'}")
     data = result.get("data")
     if isinstance(data, dict):
+        if isinstance(data.get("column_profiles"), list):
+            column_count = len(data["column_profiles"])
+            dimensions = data.get("dimension_candidates") if isinstance(data.get("dimension_candidates"), list) else []
+            enums = data.get("filterable_enums") if isinstance(data.get("filterable_enums"), dict) else {}
+            summary = str(data.get("summary") or "").strip()
+            if summary:
+                return trim(
+                    f"{summary} column_count={column_count}; dimensions={dimensions[:8]}; enum_fields={list(enums.keys())[:6]}"
+                )
+            return trim(
+                f"Profiled {column_count} column(s); dimensions={dimensions[:8]}; enum_fields={list(enums.keys())[:6]}"
+            )
         if isinstance(data.get("rows"), list):
             row_count = len(data["rows"])
             columns = data.get("columns") if isinstance(data.get("columns"), list) else []
             summary = str(data.get("summary") or "").strip()
             preview = preview_items(data["rows"])
             chart_spec = data.get("chart_spec") if isinstance(data.get("chart_spec"), dict) else None
+            truncated = bool(data.get("truncated"))
             chart_hint = ""
             if chart_spec:
                 chart_hint = f"; chart={chart_spec.get('chart_type') or 'chart'}"
+            truncation_hint = ""
+            if truncated:
+                truncation_hint = f"; truncated_at={data.get('requested_limit') or row_count}"
             if summary:
-                return trim(f"{summary} rows={row_count}; columns={columns[:8]}{chart_hint}")
+                return trim(f"{summary} rows={row_count}; columns={columns[:8]}{chart_hint}{truncation_hint}")
             suffix = f"; preview={preview}" if preview else ""
-            return trim(f"{row_count} row(s); columns={columns[:8]}{chart_hint}{suffix}")
+            return trim(f"{row_count} row(s); columns={columns[:8]}{chart_hint}{truncation_hint}{suffix}")
         if isinstance(data.get("results"), list):
             count = len(data["results"])
             query = str(data.get("query") or "").strip()
@@ -605,11 +632,141 @@ def summarize_model_trace(round_index: int, request: dict[str, Any], response: d
     )
 
 
+def build_model_artifact_stats(request: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    messages = request.get("messages") if isinstance(request, dict) else None
+    tools = request.get("tools") if isinstance(request, dict) else None
+    tool_calls = response.get("tool_calls") if isinstance(response, dict) else None
+    content = response.get("content") if isinstance(response, dict) else ""
+    usage = response.get("usage") if isinstance(response, dict) and isinstance(response.get("usage"), dict) else {}
+    stats = {
+        "input_messages": len(messages) if isinstance(messages, list) else 0,
+        "input_tools": len(tools) if isinstance(tools, list) else 0,
+        "input_chars": estimate_message_chars(messages) if isinstance(messages, list) else 0,
+        "request_json_chars": json_char_count(request),
+        "output_tool_calls": len(tool_calls) if isinstance(tool_calls, list) else 0,
+        "output_chars": len(content) if isinstance(content, str) else 0,
+        "response_json_chars": json_char_count(response),
+    }
+    if usage:
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            if usage.get(key) is not None:
+                stats[key] = usage.get(key)
+        details = usage.get("prompt_tokens_details")
+        if isinstance(details, dict) and details.get("cached_tokens") is not None:
+            stats["cached_prompt_tokens"] = details.get("cached_tokens")
+        completion_details = usage.get("completion_tokens_details")
+        if isinstance(completion_details, dict):
+            if completion_details.get("reasoning_tokens") is not None:
+                stats["reasoning_tokens"] = completion_details.get("reasoning_tokens")
+            if completion_details.get("accepted_prediction_tokens") is not None:
+                stats["accepted_prediction_tokens"] = completion_details.get("accepted_prediction_tokens")
+    return {key: value for key, value in stats.items() if value not in (None, "", [])}
+
+
+def build_tool_artifact_stats(arguments: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    stats = {
+        "input_chars": json_char_count(arguments),
+        "output_chars": json_char_count(result),
+        "argument_keys": len(arguments) if isinstance(arguments, dict) else 0,
+    }
+    if isinstance(result, dict):
+        stats["result_keys"] = len(result)
+        data = result.get("data")
+        if isinstance(data, dict):
+            stats["data_keys"] = len(data)
+            if isinstance(data.get("rows"), list):
+                stats["row_count"] = len(data.get("rows") or [])
+            if isinstance(data.get("columns"), list):
+                stats["column_count"] = len(data.get("columns") or [])
+            if isinstance(data.get("results"), list):
+                stats["result_count"] = len(data.get("results") or [])
+            if isinstance(data.get("chart_spec"), dict):
+                stats["chart_count"] = 1
+            if data.get("truncated") is not None:
+                stats["truncated"] = bool(data.get("truncated"))
+            if data.get("requested_limit") is not None:
+                stats["requested_limit"] = data.get("requested_limit")
+    return {key: value for key, value in stats.items() if value not in (None, "", [])}
+
+
+def estimate_message_chars(messages: list[Any]) -> int:
+    total = 0
+    for message in messages or []:
+        if not isinstance(message, dict):
+            total += len(str(message))
+            continue
+        total += len(str(message.get("role") or ""))
+        total += estimate_content_chars(message.get("content"))
+        if isinstance(message.get("tool_calls"), list):
+            total += json_char_count(message.get("tool_calls"))
+    return total
+
+
+def estimate_content_chars(content: Any) -> int:
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        total = 0
+        for item in content:
+            if isinstance(item, dict):
+                total += len(str(item.get("type") or ""))
+                total += len(str(item.get("text") or ""))
+                total += json_char_count(item)
+            else:
+                total += len(str(item))
+        return total
+    if content is None:
+        return 0
+    return len(str(content))
+
+
+def json_char_count(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str))
+    except TypeError:
+        return len(str(value))
+
+
+def format_stats_inline(stats: dict[str, Any]) -> str:
+    if not isinstance(stats, dict) or not stats:
+        return ""
+    ordered_keys = [
+        "prompt_tokens",
+        "completion_tokens",
+        "total_tokens",
+        "cached_prompt_tokens",
+        "reasoning_tokens",
+        "input_chars",
+        "output_chars",
+        "request_json_chars",
+        "response_json_chars",
+        "input_messages",
+        "input_tools",
+        "output_tool_calls",
+        "row_count",
+        "column_count",
+        "result_count",
+        "chart_count",
+        "truncated",
+        "requested_limit",
+    ]
+    parts: list[str] = []
+    for key in ordered_keys:
+        if key in stats:
+            parts.append(f"{key}={stats[key]}")
+    for key, value in stats.items():
+        if key not in ordered_keys:
+            parts.append(f"{key}={value}")
+    return ", ".join(parts[:10])
+
+
 def _format_artifact_line(item: dict[str, Any]) -> str:
+    stats_inline = format_stats_inline(item.get("stats") or {})
+    suffix = f" stats={stats_inline}" if stats_inline else ""
     return (
         f"- `{item.get('artifact_id')}` kind={item.get('kind')} step={item.get('tool_name')} "
         f"status={item.get('status')} conversation={item.get('conversation_id')} "
-        f"summary={item.get('summary', '')}"
+        f"summary={item.get('summary', '')}{suffix}"
     )
 
 

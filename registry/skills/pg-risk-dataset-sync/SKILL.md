@@ -1,6 +1,6 @@
 ---
 name: pg-risk-dataset-sync
-description: 将本地 Excel 或 CSV 形式的企业风险结构化数据幂等同步到 PostgreSQL，支持自动建表、按文件哈希跳过重复导入、按行指纹去重。适用于报告前先把司法案件、行政处罚等结构化数据补齐到持久库中的场景。
+description: 将本地 Excel 或 CSV 形式的企业涉法涉诉案件结构化数据幂等同步到 PostgreSQL，支持自动建表、按文件哈希跳过重复导入、按行指纹去重。适用于报告前先把司法案件、行政处罚等结构化数据补齐到持久库中的场景。
 metadata:
   owner: runtime
   category: report-analysis
@@ -46,7 +46,7 @@ metadata:
     required_secrets: {}
 ---
 
-# PostgreSQL 风险数据同步
+# PostgreSQL 涉法涉诉案件数据同步
 
 把这个 executable skill 视为报告数据层的初始化步骤，而不是一次性导数脚本。
 

@@ -761,7 +761,10 @@ def test_artifact_store_writes_manifest_timeline_and_content(tmp_path):
     assert listed["count"] == 1
     assert listed["artifacts"][0]["artifact_id"] == record.artifact_id
     assert listed["artifacts"][0]["workspace_id"] == "ws_test"
+    assert listed["artifacts"][0]["stats"]["input_chars"] > 0
+    assert listed["artifacts"][0]["stats"]["output_chars"] > 0
     assert read["success"] is True
+    assert read["stats"]["input_chars"] > 0
     assert "steel energy" in read["content"]
     assert "Recent Successful Evidence" in context
     assert "Recent Workspace Timeline" in context
@@ -800,6 +803,8 @@ def test_artifact_store_writes_model_trace(tmp_path):
     assert listed["artifacts"][0]["kind"] == "model_planning"
     assert listed["artifacts"][0]["tool_name"] == "model_planning"
     assert "input_messages=2" in listed["artifacts"][0]["summary"]
+    assert listed["artifacts"][0]["stats"]["input_messages"] == 2
+    assert listed["artifacts"][0]["stats"]["output_chars"] == 2
     assert payload["content"]["request"]["messages"][1]["content"] == "hello"
     assert payload["content"]["response"]["assistant_message"]["content"] == "hi"
     assert "model_planning" in context
@@ -1028,6 +1033,35 @@ def test_artifact_observation_uses_effective_success_and_page_excerpt():
     assert query_observation["rows_preview"][0]["industry"] == "制造业"
     assert query_observation["chart_renderer"] == "echarts"
     assert query_observation["chart_type"] == "bar"
+
+    profile_observation = AgentRuntime._build_artifact_observation(
+        "pg-table-profile",
+        {
+            "success": True,
+            "data": {
+                "mode": "profiled",
+                "summary": "表 public.enterprise_risk_events 共 11107 行、18 个字段；可优先用于分组的字段包括 event_source、region、industry。",
+                "dimension_candidates": ["event_source", "region", "industry", "accepted_date"],
+                "time_candidates": ["accepted_date"],
+                "filterable_enums": {
+                    "event_source": ["judicial_case", "administrative_penalty"],
+                    "region": ["天宁街道", "雕庄街道"],
+                },
+                "schema_overview": "event_source = judicial_case, administrative_penalty\nregion = 天宁街道, 雕庄街道",
+                "columns": ["column_name", "data_type", "enum_values_preview"],
+                "rows": [
+                    {"column_name": "event_source", "data_type": "text", "enum_values_preview": "judicial_case, administrative_penalty"},
+                    {"column_name": "region", "data_type": "text", "enum_values_preview": "天宁街道, 雕庄街道"},
+                ],
+            },
+        },
+        {"artifact_id": "art_0004_pg-table-profile", "summary": "schema profile"},
+    )
+
+    assert profile_observation["mode"] == "profiled"
+    assert profile_observation["dimension_candidates"][:2] == ["event_source", "region"]
+    assert profile_observation["enum_preview"]["event_source"] == ["judicial_case", "administrative_penalty"]
+    assert "event_source" in profile_observation["schema_overview"]
 
 
 class FakeOpenAI:

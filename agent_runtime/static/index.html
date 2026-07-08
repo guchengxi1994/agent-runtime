@@ -147,6 +147,7 @@
         .markdown-body td { @apply border-b border-zinc-200 px-3 py-2 align-top; }
         .markdown-body th { @apply bg-zinc-50 font-semibold text-zinc-900; }
         .markdown-body tr:last-child td { @apply border-b-0; }
+        .markdown-inline-chart { @apply my-4 overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50/80 p-4; }
         .markdown-body .align-left { text-align: left; }
         .markdown-body .align-center { text-align: center; }
         .markdown-body .align-right { text-align: right; }
@@ -170,6 +171,12 @@
         .tool-results { @apply grid gap-3; }
         .tool-result-group { @apply grid gap-3; }
         .tool-result-heading { @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500; }
+        .tool-results-disclosure { @apply overflow-hidden rounded-2xl border border-zinc-200 bg-white; }
+        .tool-results-disclosure summary { @apply flex cursor-pointer list-none items-center justify-between gap-3 bg-zinc-50 px-4 py-3; }
+        .tool-results-disclosure summary::-webkit-details-marker { display: none; }
+        .tool-results-disclosure summary span { @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500; }
+        .tool-results-disclosure summary strong { @apply text-[13px] font-medium text-zinc-800; }
+        .tool-results-disclosure-body { @apply grid gap-3 px-4 py-4; }
         .tool-card { @apply overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm shadow-zinc-950/[0.03]; }
         .tool-card-head { @apply flex flex-wrap items-start justify-between gap-3 border-b border-zinc-200 bg-zinc-50 px-4 py-3; }
         .tool-card-head strong { @apply text-sm font-semibold text-zinc-950; }
@@ -405,6 +412,6 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-    <script src="/static/app.js?v=20260708-dual-chart-renderers"></script>
+    <script src="/static/app.js?v=20260708-inline-chart-localized"></script>
   </body>
 </html>
