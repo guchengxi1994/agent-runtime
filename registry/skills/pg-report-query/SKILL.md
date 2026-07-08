@@ -28,6 +28,24 @@ metadata:
           type: object
           description: 可选过滤条件对象。
           additionalProperties: true
+        top_n:
+          type: integer
+          description: 只保留前 N 个结果，常用于排行问题。
+        order_by:
+          type: string
+          description: 排序字段，可用维度别名或指标别名，例如 case_count、industry、month。
+        order_direction:
+          type: string
+          description: 排序方向，asc 或 desc。
+        include_share:
+          type: boolean
+          description: 是否附带占比指标，适用于构成分析。
+        include_chart:
+          type: boolean
+          description: 是否在结果中附带前端可直接渲染的图表规格。
+        chart_type:
+          type: string
+          description: 可选图表类型提示，例如 line、bar、stacked_bar、pie。
         table_hints:
           type: array
           description: 可选候选来源表提示。
@@ -72,3 +90,11 @@ metadata:
 - 地区、行业、所有权性质、企业规模分布
 - 司法案件与行政处罚的来源拆分
 - 案件类型和风险类型的结构分析
+
+当前版本除了显式参数，还会从中文问题里自动推断：
+
+- 时间范围，例如 `2025年`、`2025年以来`
+- 来源类型，例如 `行政处罚`、`司法案件`
+- 常见分组维度，例如 `行业`、`区域`、`月份`、`案件类型`
+- 排行语义，例如 `前3`、`最多`
+- 常见图表需求，例如 `趋势图`、`柱状图`、`饼图`

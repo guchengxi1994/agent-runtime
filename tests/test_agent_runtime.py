@@ -553,6 +553,7 @@ def test_frontend_entrypoint_serves_static_page():
 
     assert response.status_code == 200
     assert "对话入口" in response.text
+    assert "echarts.min.js" in response.text
 
 
 def test_builtin_research_skills_are_registered():
@@ -996,6 +997,37 @@ def test_artifact_observation_uses_effective_success_and_page_excerpt():
     assert fetch_observation["title"] == "Steel report"
     assert fetch_observation["url"] == "https://example.com/report"
     assert "Energy balance content" in fetch_observation["text_excerpt"]
+
+    query_observation = AgentRuntime._build_artifact_observation(
+        "pg-report-query",
+        {
+            "success": True,
+            "data": {
+                "mode": "executed",
+                "summary": "共返回 3 个分组；排名第一的是制造业，案件数为 12。",
+                "sql": "SELECT industry, COUNT(*) AS case_count FROM enterprise_risk_events GROUP BY 1 ORDER BY 2 DESC LIMIT 3;",
+                "columns": ["industry", "case_count"],
+                "rows": [
+                    {"industry": "制造业", "case_count": 12},
+                    {"industry": "建筑业", "case_count": 8},
+                ],
+                "chart_spec": {
+                    "renderer": "echarts",
+                    "chart_type": "bar",
+                    "title": "行业排行",
+                    "option": {"series": []},
+                },
+            },
+        },
+        {"artifact_id": "art_0003_pg-report-query", "summary": "行业排行"},
+    )
+
+    assert query_observation["mode"] == "executed"
+    assert query_observation["row_count"] == 2
+    assert query_observation["columns"] == ["industry", "case_count"]
+    assert query_observation["rows_preview"][0]["industry"] == "制造业"
+    assert query_observation["chart_renderer"] == "echarts"
+    assert query_observation["chart_type"] == "bar"
 
 
 class FakeOpenAI:

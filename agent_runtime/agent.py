@@ -1207,6 +1207,26 @@ class AgentRuntime:
                 observation["data_success"] = data.get("success")
             if data.get("error_type"):
                 observation["error_type"] = data.get("error_type")
+            if data.get("summary"):
+                observation["summary"] = str(data.get("summary"))
+            if data.get("mode"):
+                observation["mode"] = data.get("mode")
+            if data.get("sql"):
+                observation["sql"] = AgentRuntime._compact_text(str(data.get("sql")), 1200)
+            if isinstance(data.get("columns"), list):
+                observation["columns"] = [str(item) for item in data.get("columns")[:16]]
+            if isinstance(data.get("rows"), list):
+                observation["row_count"] = len(data["rows"])
+                observation["rows_preview"] = AgentRuntime._preview_rows(data["rows"], limit=5)
+            if isinstance(data.get("chart_spec"), dict):
+                chart_spec = data["chart_spec"]
+                observation["chart_renderer"] = chart_spec.get("renderer")
+                observation["chart_type"] = chart_spec.get("chart_type")
+                observation["chart_title"] = chart_spec.get("title")
+            elif data.get("renderer") == "echarts" and isinstance(data.get("option"), dict):
+                observation["chart_renderer"] = data.get("renderer")
+                observation["chart_type"] = data.get("chart_type")
+                observation["chart_title"] = data.get("title")
             if isinstance(data.get("results"), list):
                 observation["result_count"] = len(data["results"])
                 observation["result_preview"] = [
@@ -1237,6 +1257,24 @@ class AgentRuntime:
         if len(compact) <= limit:
             return compact
         return compact[: limit - 3] + "..."
+
+    @staticmethod
+    def _preview_rows(rows: list[Any], limit: int = 5) -> list[dict[str, Any]]:
+        preview: list[dict[str, Any]] = []
+        for row in rows[:limit]:
+            if not isinstance(row, dict):
+                preview.append({"value": row})
+                continue
+            item: dict[str, Any] = {}
+            for index, (key, value) in enumerate(row.items()):
+                if index >= 8:
+                    break
+                if isinstance(value, str):
+                    item[str(key)] = AgentRuntime._compact_text(value, 120)
+                else:
+                    item[str(key)] = value
+            preview.append(item)
+        return preview
 
     @staticmethod
     def _coerce_int(value: Any, fallback: int) -> int:

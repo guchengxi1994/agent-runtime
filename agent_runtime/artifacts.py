@@ -535,6 +535,19 @@ def summarize_result(result: dict[str, Any]) -> str:
         return trim(f"Failed: {result_error_message(result) or 'Tool failed'}")
     data = result.get("data")
     if isinstance(data, dict):
+        if isinstance(data.get("rows"), list):
+            row_count = len(data["rows"])
+            columns = data.get("columns") if isinstance(data.get("columns"), list) else []
+            summary = str(data.get("summary") or "").strip()
+            preview = preview_items(data["rows"])
+            chart_spec = data.get("chart_spec") if isinstance(data.get("chart_spec"), dict) else None
+            chart_hint = ""
+            if chart_spec:
+                chart_hint = f"; chart={chart_spec.get('chart_type') or 'chart'}"
+            if summary:
+                return trim(f"{summary} rows={row_count}; columns={columns[:8]}{chart_hint}")
+            suffix = f"; preview={preview}" if preview else ""
+            return trim(f"{row_count} row(s); columns={columns[:8]}{chart_hint}{suffix}")
         if isinstance(data.get("results"), list):
             count = len(data["results"])
             query = str(data.get("query") or "").strip()
@@ -620,7 +633,15 @@ def preview_items(items: list[Any], limit: int = 3) -> str:
     previews = []
     for item in items[:limit]:
         if isinstance(item, dict):
-            title = item.get("title") or item.get("url") or item.get("name")
+            title = (
+                item.get("title")
+                or item.get("url")
+                or item.get("name")
+                or item.get("company_name")
+                or item.get("case_title")
+                or item.get("industry")
+                or item.get("region")
+            )
             if title:
                 previews.append(str(title))
         else:

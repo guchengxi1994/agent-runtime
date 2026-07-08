@@ -66,6 +66,30 @@ def test_pg_report_query_returns_query_plan():
     assert "GROUP BY 1, 2" in result["sql"]
 
 
+def test_pg_report_query_infers_aggregation_and_chart_plan_from_question():
+    module = load_skill_module(Path("registry/skills/pg-report-query/skill.py"))
+
+    result = module.execute(
+        {
+            "report_question": "统计2025年行政处罚最多的行业前三名，并生成柱状图",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["mode"] == "plan_only"
+    assert result["dimensions"] == ["industry"]
+    assert result["metrics"][0] == "case_count"
+    assert result["filters"]["event_source"] == "administrative_penalty"
+    assert result["filters"]["year"] == 2025
+    assert result["top_n"] == 3
+    assert result["order_by"] == "case_count"
+    assert result["chart_plan"]["enabled"] is True
+    assert result["chart_plan"]["chart_type"] == "bar"
+    assert "event_source = 'administrative_penalty'" in result["sql"]
+    assert "EXTRACT(YEAR FROM accepted_date) = 2025" in result["sql"]
+    assert "LIMIT 3;" in result["sql"]
+
+
 def test_pg_case_search_returns_retrieval_plan():
     module = load_skill_module(Path("registry/skills/pg-case-search/skill.py"))
 
@@ -83,6 +107,15 @@ def test_pg_case_search_returns_retrieval_plan():
     assert "FROM enterprise_risk_events" in result["sql"]
     assert "illegal_subcontracting" in result["sql"]
     assert any("违规分包导致工程款回收风险" in item for item in result["shortlist_guidance"])
+
+
+def test_pg_case_search_infers_limit_from_question():
+    module = load_skill_module(Path("registry/skills/pg-case-search/skill.py"))
+
+    result = module.execute({"query": "前3个最新的行政处罚案例"})
+
+    assert result["success"] is True
+    assert result["limit"] == 3
 
 
 def test_pg_risk_dataset_sync_dry_run_reads_bundled_excel_files(monkeypatch):

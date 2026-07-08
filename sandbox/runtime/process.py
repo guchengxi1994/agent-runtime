@@ -84,15 +84,18 @@ def build_process_env(
     venv_dir: Path,
     tmp_dir: Path,
     settings: RuntimeSettings,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     tmp_home = tmp_dir / "home"
     tmp_home.mkdir(parents=True, exist_ok=True)
+    inherited_env = dict(os.environ)
+    lang = inherited_env.get("LANG", "C.UTF-8")
     env = {
-        "PATH": os.environ.get("PATH", ""),
+        **inherited_env,
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUNBUFFERED": "1",
-        "LANG": os.environ.get("LANG", "C.UTF-8"),
-        "LC_ALL": os.environ.get("LC_ALL", os.environ.get("LANG", "C.UTF-8")),
+        "LANG": lang,
+        "LC_ALL": inherited_env.get("LC_ALL", lang),
         "HOME": str(tmp_home),
         "XDG_CACHE_HOME": str(tmp_home / ".cache"),
         "XDG_CONFIG_HOME": str(tmp_home / ".config"),
@@ -109,6 +112,8 @@ def build_process_env(
         env["PIP_EXTRA_INDEX_URL"] = config.pip_extra_index_url
     if config.pip_trusted_host:
         env["PIP_TRUSTED_HOST"] = config.pip_trusted_host
+    if extra_env:
+        env.update(extra_env)
     env.update(config.env)
     return env
 
@@ -1588,7 +1593,13 @@ async def execute_bundle_runtime(
             command,
             settings=settings,
             phase_ctx=execute_phase,
-            env={**load_bundle_dotenv(bundle_dir), **build_process_env(config, venv_dir, workspace.tmp_dir, settings)},
+            env=build_process_env(
+                config,
+                venv_dir,
+                workspace.tmp_dir,
+                settings,
+                extra_env=load_bundle_dotenv(bundle_dir),
+            ),
             cwd=bundle_dir,
             timeout_ms=remaining_timeout_ms(budget, settings, phase_ctx=execute_phase),
             idle_timeout_ms=config.idle_timeout_ms,
@@ -1860,7 +1871,13 @@ async def validate_bundle_runtime(
             command,
             settings=settings,
             phase_ctx=execute_phase,
-            env={**load_bundle_dotenv(bundle_dir), **build_process_env(config, venv_dir, workspace.tmp_dir, settings)},
+            env=build_process_env(
+                config,
+                venv_dir,
+                workspace.tmp_dir,
+                settings,
+                extra_env=load_bundle_dotenv(bundle_dir),
+            ),
             cwd=bundle_dir,
             timeout_ms=remaining_timeout_ms(budget, settings, phase_ctx=execute_phase),
             idle_timeout_ms=config.idle_timeout_ms,

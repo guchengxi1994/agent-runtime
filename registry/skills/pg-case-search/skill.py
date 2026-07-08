@@ -4,6 +4,7 @@ definition = {
 }
 
 import os
+import re
 from datetime import date, datetime
 
 
@@ -30,7 +31,9 @@ def execute(params):
     sort_by = str(params.get("sort_by") or "relevance").strip().lower() or "relevance"
     include_sql = bool(params.get("include_sql", True))
     execute_flag = bool(params.get("execute", False))
-    limit = max(1, min(int(params.get("limit") or 10), 50))
+    limit = max(1, min(int(params.get("limit") or _infer_limit_from_query(query) or 10), 50))
+    if sort_by == "relevance" and _contains_any(query, ["最新", "最近", "近年"]):
+        sort_by = "year_desc"
 
     if not query and not tags and not filters:
         raise ValueError("query, tags, or filters is required")
@@ -122,6 +125,7 @@ def execute(params):
         result["columns"] = columns
         result["row_count"] = len(rows)
         result["dataset_status"] = dataset_status
+        result["summary"] = _summarize_case_rows(rows, query)
     return result
 
 
@@ -239,6 +243,16 @@ def _shortlist_guidance(query, tags, filters):
     return guidance
 
 
+def _summarize_case_rows(rows, query):
+    if not rows:
+        return "未检索到匹配案例。"
+    first = rows[0]
+    company = first.get("company_name") or "未命名企业"
+    case_title = first.get("case_title") or first.get("case_category") or "未命名案件"
+    accepted_date = first.get("accepted_date") or "未知日期"
+    return f"共检索到 {len(rows)} 条候选记录；最新一条来自 {company}，案件为 {case_title}，时间 {accepted_date}。"
+
+
 def _string_list(value):
     if not isinstance(value, list):
         return []
@@ -248,6 +262,25 @@ def _string_list(value):
         if text:
             result.append(text)
     return result
+
+
+def _infer_limit_from_query(query):
+    if not query:
+        return None
+    match = re.search(r"前\s*(\d+)", query)
+    if match:
+        return max(1, min(int(match.group(1)), 50))
+    for text, value in {"前三": 3, "前五": 5, "前十": 10}.items():
+        if text in query:
+            return value
+    match = re.search(r"top\s*(\d+)", query, flags=re.IGNORECASE)
+    if match:
+        return max(1, min(int(match.group(1)), 50))
+    return None
+
+
+def _contains_any(text, keywords):
+    return any(keyword in text for keyword in keywords)
 
 
 def _validate_read_only_sql(sql):

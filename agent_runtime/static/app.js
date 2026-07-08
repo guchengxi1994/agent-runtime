@@ -253,11 +253,12 @@ function addMessage(role, text, steps = [], requestedInputs = [], liveStream = n
   return item;
 }
 
-function updateAssistantMessage(item, text, steps = [], requestedInputs = [], liveStream = null) {
+function updateAssistantMessage(item, text, steps = [], requestedInputs = [], liveStream = null, toolCalls = []) {
   const bubble = item.querySelector(".bubble");
   const body = item.querySelector(".message-body");
+  disposeCharts(body);
   bubble.innerHTML = renderMarkdown(text);
-  for (const existing of body.querySelectorAll(".live-stream, .requested-inputs, .run-log")) {
+  for (const existing of body.querySelectorAll(".live-stream, .requested-inputs, .run-log, .tool-results")) {
     existing.remove();
   }
   if (liveStream) {
@@ -265,6 +266,13 @@ function updateAssistantMessage(item, text, steps = [], requestedInputs = [], li
   }
   if (requestedInputs.length) {
     body.insertAdjacentHTML("beforeend", renderRequestedInputs(requestedInputs));
+  }
+  if (toolCalls.length) {
+    const toolResultsHtml = renderToolResults(toolCalls);
+    if (toolResultsHtml) {
+      body.insertAdjacentHTML("beforeend", toolResultsHtml);
+      hydrateToolResults(body, toolCalls);
+    }
   }
   if (steps.length) {
     body.insertAdjacentHTML("beforeend", renderRunLog(steps));
@@ -393,6 +401,178 @@ function renderRunLog(steps) {
   `;
 }
 
+function normalizeToolData(toolCall) {
+  if (!toolCall || typeof toolCall !== "object") {
+    return null;
+  }
+  const result = toolCall.result && typeof toolCall.result === "object" ? toolCall.result : {};
+  const data = result.data && typeof result.data === "object" ? result.data : null;
+  if (!data) {
+    return null;
+  }
+  return {
+    toolName: String(toolCall.tool_name || toolCall.toolName || "tool"),
+    data,
+  };
+}
+
+function extractToolResults(toolCalls) {
+  const charts = [];
+  const tables = [];
+  for (const toolCall of toolCalls || []) {
+    const normalized = normalizeToolData(toolCall);
+    if (!normalized) {
+      continue;
+    }
+    const { toolName, data } = normalized;
+    const chartData =
+      data.chart_spec && typeof data.chart_spec === "object"
+        ? data.chart_spec
+        : data.renderer === "echarts" && data.option
+          ? data
+          : null;
+    if (chartData && chartData.renderer === "echarts" && chartData.option) {
+      charts.push({
+        toolName,
+        title: chartData.title || data.title || "图表",
+        chartType: chartData.chart_type || data.chart_type || "chart",
+        option: chartData.option,
+        summary: data.summary || "",
+      });
+    }
+    if (Array.isArray(data.rows) && data.rows.length && Array.isArray(data.columns) && data.columns.length) {
+      tables.push({
+        toolName,
+        title:
+          data.report_question ||
+          data.query ||
+          (toolName === "pg-case-search" ? "案例检索结果" : "查询结果"),
+        summary: data.summary || "",
+        rowCount: Number(data.row_count || data.rows.length || 0),
+        columns: data.columns,
+        rows: data.rows,
+      });
+    }
+  }
+  return { charts, tables };
+}
+
+function renderToolResults(toolCalls) {
+  const { charts, tables } = extractToolResults(toolCalls);
+  if (!charts.length && !tables.length) {
+    return "";
+  }
+  const chartHtml = charts
+    .map(
+      (chart, index) => `
+        <article class="tool-card">
+          <div class="tool-card-head">
+            <div>
+              <strong>${escapeText(chart.title || "图表")}</strong>
+              <span>${escapeText(chart.toolName)}</span>
+            </div>
+            <span class="tool-result-badge">${escapeText(chart.chartType || "chart")}</span>
+          </div>
+          <div class="tool-card-body">
+            ${chart.summary ? `<p class="tool-card-summary">${escapeText(chart.summary)}</p>` : ""}
+            <div class="chart-canvas" data-chart-index="${index}"></div>
+          </div>
+        </article>
+      `,
+    )
+    .join("");
+  const tableHtml = tables
+    .map((table) => {
+      const limitedRows = table.rows.slice(0, 12);
+      const head = table.columns.map((column) => `<th>${escapeText(column)}</th>`).join("");
+      const body = limitedRows
+        .map(
+          (row) =>
+            `<tr>${table.columns
+              .map((column) => `<td>${renderInlineMarkdown(String(row[column] ?? ""))}</td>`)
+              .join("")}</tr>`,
+        )
+        .join("");
+      const footer =
+        table.rows.length > limitedRows.length
+          ? `<p class="chart-meta">仅展示前 ${limitedRows.length} 行，共 ${table.rowCount || table.rows.length} 行。</p>`
+          : `<p class="chart-meta">共 ${table.rowCount || table.rows.length} 行。</p>`;
+      return `
+        <article class="tool-card">
+          <div class="tool-card-head">
+            <div>
+              <strong>${escapeText(table.title || "查询结果")}</strong>
+              <span>${escapeText(table.toolName)}</span>
+            </div>
+            <span class="tool-result-badge">${escapeText(`${table.rowCount || table.rows.length} rows`)}</span>
+          </div>
+          <div class="tool-card-body">
+            ${table.summary ? `<p class="tool-card-summary">${escapeText(table.summary)}</p>` : ""}
+            <div class="tool-result-table-wrap">
+              <table class="tool-result-table">
+                <thead><tr>${head}</tr></thead>
+                <tbody>${body}</tbody>
+              </table>
+            </div>
+            ${footer}
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  return `
+    <section class="tool-results" aria-label="结构化结果">
+      ${charts.length ? `<div class="tool-result-group"><div class="tool-result-heading">图表结果</div>${chartHtml}</div>` : ""}
+      ${tables.length ? `<div class="tool-result-group"><div class="tool-result-heading">查询结果</div>${tableHtml}</div>` : ""}
+    </section>
+  `;
+}
+
+function hydrateToolResults(body, toolCalls) {
+  const { charts } = extractToolResults(toolCalls);
+  if (!charts.length || !window.echarts) {
+    return;
+  }
+  const containers = Array.from(body.querySelectorAll(".chart-canvas"));
+  containers.forEach((container, index) => {
+    const chart = charts[index];
+    if (!chart) {
+      return;
+    }
+    const existing = window.echarts.getInstanceByDom(container);
+    if (existing) {
+      existing.dispose();
+    }
+    const instance = window.echarts.init(container, null, { renderer: "canvas" });
+    instance.setOption(chart.option);
+    const resize = () => instance.resize();
+    if (window.ResizeObserver) {
+      const observer = new ResizeObserver(resize);
+      observer.observe(container);
+      container._chartObserver = observer;
+    }
+    container._chartInstance = instance;
+    requestAnimationFrame(resize);
+  });
+}
+
+function disposeCharts(root) {
+  for (const container of root.querySelectorAll(".chart-canvas")) {
+    if (container._chartObserver) {
+      container._chartObserver.disconnect();
+      delete container._chartObserver;
+    }
+    if (window.echarts) {
+      const instance = container._chartInstance || window.echarts.getInstanceByDom(container);
+      if (instance) {
+        instance.dispose();
+      }
+    }
+    delete container._chartInstance;
+  }
+}
+
 function buildRequest(message, uploadedFiles = []) {
   const body = new FormData();
   body.append("message", message);
@@ -453,6 +633,7 @@ async function sendMessage(event) {
       streamedSteps,
       [],
       liveStreamHasContent(liveStream) ? liveStream : null,
+      [],
     );
   }
 
@@ -507,6 +688,7 @@ async function sendMessage(event) {
           payload.steps || streamedSteps,
           requestedInputs,
           null,
+          payload.tool_calls || [],
         );
       },
       error(payload) {
@@ -514,7 +696,7 @@ async function sendMessage(event) {
       },
     });
   } catch (error) {
-    updateAssistantMessage(assistantItem, `请求失败：${error.message}`, streamedSteps);
+    updateAssistantMessage(assistantItem, `请求失败：${error.message}`, streamedSteps, [], null, []);
   } finally {
     button.disabled = false;
     button.textContent = "发送";

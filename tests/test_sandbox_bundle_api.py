@@ -64,6 +64,27 @@ def build_bundle_with_dotenv() -> bytes:
     return buffer.getvalue()
 
 
+def build_bundle_reads_env() -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps({"runtime": "python", "entrypoint": "skill.py"}, ensure_ascii=False),
+        )
+        archive.writestr(
+            "skill.py",
+            "\n".join(
+                [
+                    "import os",
+                    "definition = {'name': 'bundle-env-reader', 'description': 'demo'}",
+                    "def execute(params):",
+                    "    return {'pghost': os.getenv('PGHOST', ''), 'pgport': os.getenv('PGPORT', '')}",
+                ]
+            ),
+        )
+    return buffer.getvalue()
+
+
 def test_runner_returns_argument_keys_trace(tmp_path):
     sandbox_root = Path("sandbox").resolve()
     if str(sandbox_root) not in sys.path:
@@ -146,9 +167,11 @@ def test_bundle_execute_accepts_skill_context_and_returns_execution_metadata(mon
     assert payload["trace"]["arguments_preview"]["value"] == 7
 
 
-def test_bundle_execute_can_read_dotenv_from_bundle():
+def test_bundle_execute_can_read_dotenv_from_bundle(monkeypatch):
     sandbox_app = load_sandbox_app_module()
     client = TestClient(sandbox_app.app)
+    monkeypatch.setenv("PGHOST", "parent-pg")
+    monkeypatch.setenv("PGPORT", "6543")
 
     response = client.post(
         "/bundle/execute",
@@ -183,3 +206,86 @@ def test_bundle_execute_can_read_dotenv_from_bundle():
     assert payload["success"] is True
     assert payload["data"]["pghost"] == "bundle-pg"
     assert payload["data"]["pgport"] == "5432"
+
+
+def test_bundle_execute_inherits_parent_env(monkeypatch):
+    sandbox_app = load_sandbox_app_module()
+    client = TestClient(sandbox_app.app)
+    monkeypatch.setenv("PGHOST", "parent-pg")
+    monkeypatch.setenv("PGPORT", "6543")
+
+    response = client.post(
+        "/bundle/execute",
+        data={
+            "params": json.dumps({}, ensure_ascii=False),
+            "skill": json.dumps(
+                {
+                    "name": "bundle-env-demo",
+                    "entrypoint": "skill.py",
+                    "execution_policy": {"packages": []},
+                    "required_secrets": {},
+                },
+                ensure_ascii=False,
+            ),
+            "context": json.dumps(
+                {
+                    "agent_id": "default",
+                    "conversation_id": "conv_env_parent",
+                    "workspace_id": "ws_env_parent",
+                    "run_id": "run_env_parent",
+                    "user_id": "user_env_parent",
+                    "tool_call_id": "call_env_parent",
+                },
+                ensure_ascii=False,
+            ),
+        },
+        files={"bundle": ("bundle.zip", build_bundle_reads_env(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["pghost"] == "parent-pg"
+    assert payload["data"]["pgport"] == "6543"
+
+
+def test_bundle_execute_env_precedence(monkeypatch):
+    sandbox_app = load_sandbox_app_module()
+    client = TestClient(sandbox_app.app)
+    monkeypatch.setenv("PGHOST", "parent-pg")
+    monkeypatch.setenv("PGPORT", "6543")
+
+    response = client.post(
+        "/bundle/execute",
+        data={
+            "params": json.dumps({}, ensure_ascii=False),
+            "skill": json.dumps(
+                {
+                    "name": "bundle-env-demo",
+                    "entrypoint": "skill.py",
+                    "execution_policy": {"packages": []},
+                    "required_secrets": {},
+                },
+                ensure_ascii=False,
+            ),
+            "context": json.dumps(
+                {
+                    "agent_id": "default",
+                    "conversation_id": "conv_env_override",
+                    "workspace_id": "ws_env_override",
+                    "run_id": "run_env_override",
+                    "user_id": "user_env_override",
+                    "tool_call_id": "call_env_override",
+                },
+                ensure_ascii=False,
+            ),
+            "base_policy": json.dumps({"env": {"PGHOST": "policy-pg", "PGPORT": "7654"}}, ensure_ascii=False),
+        },
+        files={"bundle": ("bundle.zip", build_bundle_with_dotenv(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["pghost"] == "policy-pg"
+    assert payload["data"]["pgport"] == "7654"
