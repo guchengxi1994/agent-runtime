@@ -53,6 +53,9 @@
         .composer-actions {
           @apply flex items-center justify-between gap-3;
         }
+        .header-actions {
+          @apply flex items-center gap-2;
+        }
         .chat-header {
           @apply border-b border-zinc-200/80 px-5 py-4 sm:px-6;
         }
@@ -173,7 +176,42 @@
         .tool-card-head span { @apply text-xs text-zinc-500; }
         .tool-card-body { @apply grid gap-3 px-4 py-4; }
         .tool-card-summary { @apply text-[13px] leading-6 text-zinc-700; }
-        .chart-canvas { @apply h-[320px] w-full rounded-2xl bg-white; }
+        .chart-canvas { @apply overflow-hidden rounded-2xl border border-zinc-200 bg-zinc-50/80 p-4; min-height: 320px; }
+        .chart-shell { @apply grid gap-4; min-height: 288px; }
+        .chart-scroll { @apply overflow-x-auto pb-1; }
+        .chart-legend { @apply flex flex-wrap gap-2; }
+        .chart-legend-item { @apply inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white px-2.5 py-1 text-xs font-medium text-zinc-700; }
+        .chart-swatch { @apply h-2.5 w-2.5 rounded-full; }
+        .chart-scale { @apply flex items-center justify-between text-[11px] text-zinc-500; }
+        .chart-plot { @apply relative mt-2 h-56; }
+        .chart-plot-frame { @apply relative h-full; }
+        .chart-grid { @apply pointer-events-none absolute inset-0 grid; grid-template-rows: repeat(4, minmax(0, 1fr)); }
+        .chart-grid-line { @apply border-t border-dashed border-zinc-200; }
+        .chart-bars { @apply relative z-[1] grid h-full items-end gap-3; }
+        .chart-category { @apply grid h-full min-w-0 gap-2; grid-template-rows: minmax(0, 1fr) auto; }
+        .chart-bar-group { @apply flex h-full items-end justify-center gap-1.5; }
+        .chart-bar-column { @apply flex h-full min-w-0 flex-1 flex-col justify-end gap-1; }
+        .chart-bar-value { @apply text-center text-[11px] font-medium text-zinc-500; }
+        .chart-bar { @apply w-full min-w-[14px] rounded-t-xl shadow-sm; }
+        .chart-bar-stack { @apply flex w-full min-w-[18px] flex-col-reverse overflow-hidden rounded-t-xl shadow-sm; }
+        .chart-bar-segment { @apply w-full; }
+        .chart-category-label { @apply truncate text-center text-[11px] font-medium text-zinc-600; }
+        .chart-line-wrap { @apply grid gap-2; }
+        .chart-line-svg { @apply block h-56 w-full; }
+        .chart-axis-grid { @apply grid gap-3 text-[11px] text-zinc-600; }
+        .chart-axis-label { @apply truncate text-center; }
+        .chart-pie-layout { @apply grid items-center gap-5; grid-template-columns: minmax(0, 16rem) minmax(0, 1fr); }
+        .chart-pie-wrap { @apply grid place-items-center; }
+        .chart-pie { @apply grid aspect-square w-full max-w-[16rem] place-items-center rounded-full shadow-inner; }
+        .chart-pie-hole { @apply grid h-[58%] w-[58%] place-items-center rounded-full border border-white/70 bg-white/90 text-center shadow-sm; }
+        .chart-pie-total { @apply text-lg font-semibold text-zinc-950; }
+        .chart-pie-caption { @apply text-[11px] uppercase tracking-[0.12em] text-zinc-500; }
+        .chart-segment-list { @apply grid gap-2; }
+        .chart-segment-item { @apply flex items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white px-3 py-2; }
+        .chart-segment-main { @apply flex min-w-0 items-center gap-2; }
+        .chart-segment-label { @apply truncate text-sm font-medium text-zinc-800; }
+        .chart-segment-metrics { @apply text-right text-xs text-zinc-500; }
+        .chart-empty { @apply grid h-full min-h-[240px] place-items-center rounded-2xl border border-dashed border-zinc-300 bg-white text-sm text-zinc-500; }
         .chart-meta { @apply text-xs text-zinc-500; }
         .tool-result-table-wrap { @apply overflow-auto rounded-2xl border border-zinc-200; }
         .tool-result-table { @apply w-full min-w-[32rem] border-collapse text-sm; }
@@ -190,6 +228,9 @@
         #fileInput { @apply block w-full max-w-full text-sm text-zinc-600; }
         #fileInput::file-selector-button { @apply mr-3 rounded-xl border-0 bg-zinc-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800; }
         .workspace-input { @apply block w-full rounded-2xl border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10; }
+        .chart-renderer-select {
+          @apply rounded-2xl border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-800 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10;
+        }
         .selected-files { @apply flex flex-wrap gap-2; }
         .selected-file { @apply rounded-full border border-zinc-200 bg-zinc-100 px-3 py-1.5 text-xs font-medium text-zinc-700; }
         .uploaded-files { @apply grid gap-2 rounded-2xl border border-zinc-200 bg-zinc-50/80 p-3; }
@@ -276,6 +317,13 @@
           @apply items-stretch;
           flex-direction: column;
         }
+        .header-actions {
+          @apply items-stretch;
+          flex-direction: column;
+        }
+        .chart-pie-layout {
+          grid-template-columns: 1fr;
+        }
         .message {
           grid-template-columns: 2rem minmax(0, 1fr);
         }
@@ -302,7 +350,14 @@
             <p class="eyebrow">Agent Runtime</p>
             <h3>对话入口</h3>
           </div>
-          <button class="ghost" id="resetConversation" type="button">新会话</button>
+          <div class="header-actions">
+            <select class="chart-renderer-select" id="chartRendererSelect" aria-label="Chart renderer">
+              <option value="auto">Charts: Auto</option>
+              <option value="tailwind">Charts: Tailwind</option>
+              <option value="echarts">Charts: ECharts</option>
+            </select>
+            <button class="ghost" id="resetConversation" type="button">新会话</button>
+          </div>
         </header>
 
         <div class="messages" id="messages">
@@ -350,6 +405,6 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-    <script src="/static/app.js?v=20260708-query-charts"></script>
+    <script src="/static/app.js?v=20260708-dual-chart-renderers"></script>
   </body>
 </html>

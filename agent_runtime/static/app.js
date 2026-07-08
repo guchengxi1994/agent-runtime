@@ -1,9 +1,37 @@
 const state = {
   conversationId: null,
   workspaceId: "",
+  chartRenderer: "auto",
 };
 
 const $ = (id) => document.getElementById(id);
+const CHART_RENDERER_STORAGE_KEY = "agent_runtime_chart_renderer";
+const CHART_COLORS = ["#0f766e", "#2563eb", "#ea580c", "#7c3aed", "#dc2626", "#0891b2", "#65a30d", "#4f46e5"];
+
+function normalizeChartRenderer(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return ["auto", "tailwind", "echarts"].includes(normalized) ? normalized : "auto";
+}
+
+function loadChartRendererPreference() {
+  const explicit = normalizeChartRenderer(window.__AGENT_RUNTIME_CHART_RENDERER__);
+  if (explicit !== "auto" || window.__AGENT_RUNTIME_CHART_RENDERER__ === "auto") {
+    return explicit;
+  }
+  try {
+    return normalizeChartRenderer(window.localStorage.getItem(CHART_RENDERER_STORAGE_KEY));
+  } catch {
+    return "auto";
+  }
+}
+
+function saveChartRendererPreference(value) {
+  try {
+    window.localStorage.setItem(CHART_RENDERER_STORAGE_KEY, normalizeChartRenderer(value));
+  } catch {
+    // Ignore localStorage failures in restricted browser modes.
+  }
+}
 
 function escapeText(value) {
   const div = document.createElement("div");
@@ -253,7 +281,7 @@ function addMessage(role, text, steps = [], requestedInputs = [], liveStream = n
   return item;
 }
 
-function updateAssistantMessage(item, text, steps = [], requestedInputs = [], liveStream = null, toolCalls = []) {
+function updateAssistantMessage(item, text, steps = [], requestedInputs = [], liveStream = null, toolCalls = [], options = {}) {
   const bubble = item.querySelector(".bubble");
   const body = item.querySelector(".message-body");
   disposeCharts(body);
@@ -277,7 +305,16 @@ function updateAssistantMessage(item, text, steps = [], requestedInputs = [], li
   if (steps.length) {
     body.insertAdjacentHTML("beforeend", renderRunLog(steps));
   }
-  $("messages").scrollTop = $("messages").scrollHeight;
+  item._renderState = {
+    text,
+    steps,
+    requestedInputs,
+    liveStream,
+    toolCalls,
+  };
+  if (options.scroll !== false) {
+    $("messages").scrollTop = $("messages").scrollHeight;
+  }
 }
 
 function createLiveStreamState() {
@@ -428,15 +465,16 @@ function extractToolResults(toolCalls) {
     const chartData =
       data.chart_spec && typeof data.chart_spec === "object"
         ? data.chart_spec
-        : data.renderer === "echarts" && data.option
+        : data.option && typeof data.option === "object"
           ? data
           : null;
-    if (chartData && chartData.renderer === "echarts" && chartData.option) {
+    if (chartData && chartData.option && typeof chartData.option === "object") {
       charts.push({
         toolName,
         title: chartData.title || data.title || "图表",
         chartType: chartData.chart_type || data.chart_type || "chart",
         option: chartData.option,
+        rendererHint: chartData.renderer || data.renderer || "",
         summary: data.summary || "",
       });
     }
@@ -476,6 +514,7 @@ function renderToolResults(toolCalls) {
           <div class="tool-card-body">
             ${chart.summary ? `<p class="tool-card-summary">${escapeText(chart.summary)}</p>` : ""}
             <div class="chart-canvas" data-chart-index="${index}"></div>
+            <p class="chart-meta" data-chart-meta-index="${index}"></p>
           </div>
         </article>
       `,
@@ -529,47 +568,472 @@ function renderToolResults(toolCalls) {
   `;
 }
 
+function formatMetric(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) {
+    return "0";
+  }
+  return new Intl.NumberFormat("zh-CN", {
+    notation: "compact",
+    maximumFractionDigits: numeric >= 100 ? 0 : 1,
+  }).format(numeric);
+}
+
+function formatPercent(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) {
+    return "0%";
+  }
+  return `${numeric.toFixed(numeric >= 10 ? 0 : 1)}%`;
+}
+
+function normalizeChartValue(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+  if (value && typeof value === "object") {
+    if (Array.isArray(value) && value.length) {
+      return normalizeChartValue(value[value.length - 1]);
+    }
+    if ("value" in value) {
+      return normalizeChartValue(value.value);
+    }
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function buildChartLegend(series) {
+  if (!Array.isArray(series) || !series.length) {
+    return "";
+  }
+  return `
+    <div class="chart-legend">
+      ${series
+        .map(
+          (item) => `
+            <span class="chart-legend-item">
+              <span class="chart-swatch" style="background:${item.color};"></span>
+              <span>${escapeText(item.name || "系列")}</span>
+            </span>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function buildTailwindChartModel(chart) {
+  const option = chart && chart.option && typeof chart.option === "object" ? chart.option : null;
+  if (!option) {
+    return null;
+  }
+  const chartType = String(chart.chartType || "").trim().toLowerCase();
+  if (chartType === "pie") {
+    const pieSeries = Array.isArray(option.series) ? option.series[0] : null;
+    const segments = Array.isArray(pieSeries?.data)
+      ? pieSeries.data.map((item, index) => ({
+          name: String(item?.name || `分类 ${index + 1}`),
+          value: normalizeChartValue(item?.value),
+          color: CHART_COLORS[index % CHART_COLORS.length],
+        }))
+      : [];
+    if (!segments.length) {
+      return null;
+    }
+    return {
+      type: "pie",
+      title: chart.title || option.title?.text || "图表",
+      segments,
+      total: segments.reduce((sum, item) => sum + Math.max(0, item.value), 0),
+    };
+  }
+
+  if (!["bar", "stacked_bar", "line"].includes(chartType)) {
+    return null;
+  }
+  const rawSeries = Array.isArray(option.series) ? option.series : [];
+  const categories = Array.isArray(option.xAxis?.data) ? option.xAxis.data.map((item) => String(item ?? "")) : [];
+  if (!categories.length || !rawSeries.length) {
+    return null;
+  }
+  const pointCount = Math.max(categories.length, ...rawSeries.map((item) => (Array.isArray(item?.data) ? item.data.length : 0)));
+  const normalizedCategories = Array.from({ length: pointCount }, (_, index) => String(categories[index] ?? index + 1));
+  const series = rawSeries
+    .map((item, index) => ({
+      name: String(item?.name || `系列 ${index + 1}`),
+      values: Array.from({ length: pointCount }, (_, itemIndex) =>
+        normalizeChartValue(Array.isArray(item?.data) ? item.data[itemIndex] : 0),
+      ),
+      stack: item?.stack || null,
+      color: CHART_COLORS[index % CHART_COLORS.length],
+    }))
+    .filter((item) => item.values.some((value) => Number.isFinite(value)));
+  if (!series.length) {
+    return null;
+  }
+  const stacked = chartType === "stacked_bar" || series.some((item) => item.stack);
+  const maxValue = stacked
+    ? Math.max(
+        1,
+        ...Array.from({ length: pointCount }, (_, index) =>
+          series.reduce((sum, item) => sum + Math.max(0, item.values[index] || 0), 0),
+        ),
+      )
+    : Math.max(1, ...series.flatMap((item) => item.values.map((value) => Math.max(0, value))));
+  return {
+    type: stacked ? "stacked_bar" : chartType,
+    title: chart.title || option.title?.text || "图表",
+    categories: normalizedCategories,
+    series,
+    maxValue,
+  };
+}
+
+function canRenderWithTailwind(chart) {
+  return Boolean(buildTailwindChartModel(chart));
+}
+
+function resolveChartRenderer(chart) {
+  const preferred = normalizeChartRenderer(state.chartRenderer);
+  const tailwindReady = canRenderWithTailwind(chart);
+  const echartsReady = Boolean(window.echarts && chart.option);
+  if (preferred === "tailwind") {
+    return tailwindReady ? "tailwind" : echartsReady ? "echarts" : "unsupported";
+  }
+  if (preferred === "echarts") {
+    return echartsReady ? "echarts" : tailwindReady ? "tailwind" : "unsupported";
+  }
+  if (tailwindReady) {
+    return "tailwind";
+  }
+  if (echartsReady) {
+    return "echarts";
+  }
+  return "unsupported";
+}
+
+function buildChartMeta(chart, renderer) {
+  const preferred = normalizeChartRenderer(state.chartRenderer);
+  const source = chart.rendererHint || "spec";
+  const rendererLabel =
+    renderer === "tailwind" ? "Tailwind / SVG" : renderer === "echarts" ? "ECharts" : "Unavailable";
+  const preferredLabel = preferred === "auto" ? "Auto" : preferred === "tailwind" ? "Tailwind" : "ECharts";
+  const fallbackNote =
+    preferred !== "auto" && ((preferred === "tailwind" && renderer !== "tailwind") || (preferred === "echarts" && renderer !== "echarts"))
+      ? ` · 已从 ${preferredLabel} 回退`
+      : "";
+  return `渲染：${rendererLabel}${fallbackNote} · 规格：${source}`;
+}
+
+function renderChartGridLines() {
+  return Array.from({ length: 4 }, () => `<div class="chart-grid-line"></div>`).join("");
+}
+
+function renderTailwindBarChart(model) {
+  const minWidth = Math.max(360, model.categories.length * (model.series.length > 1 ? 78 : 66));
+  const showValueLabels = model.categories.length <= 8 && model.series.length <= 4;
+  const bars = model.categories
+    .map((category, categoryIndex) => {
+      const seriesMarkup = model.series
+        .map((series) => {
+          const value = Math.max(0, series.values[categoryIndex] || 0);
+          const height = value <= 0 ? 0 : Math.max(4, (value / model.maxValue) * 100);
+          return `
+            <div class="chart-bar-column">
+              ${showValueLabels ? `<span class="chart-bar-value">${escapeText(formatMetric(value))}</span>` : ""}
+              <div
+                class="chart-bar"
+                style="height:${height}%;background:${series.color};"
+                title="${escapeText(`${series.name} · ${category}: ${value}`)}"
+              ></div>
+            </div>
+          `;
+        })
+        .join("");
+      return `
+        <div class="chart-category">
+          <div class="chart-bar-group">${seriesMarkup}</div>
+          <div class="chart-category-label" title="${escapeText(category)}">${escapeText(category)}</div>
+        </div>
+      `;
+    })
+    .join("");
+  return `
+    <div class="chart-shell">
+      ${buildChartLegend(model.series)}
+      <div class="chart-scroll">
+        <div class="chart-scale" style="min-width:${minWidth}px;">
+          <span>${escapeText(formatMetric(model.maxValue))}</span>
+          <span>0</span>
+        </div>
+        <div class="chart-plot">
+          <div class="chart-plot-frame" style="min-width:${minWidth}px;">
+            <div class="chart-grid">${renderChartGridLines()}</div>
+            <div class="chart-bars" style="grid-template-columns:repeat(${model.categories.length}, minmax(0, 1fr));">
+              ${bars}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTailwindStackedBarChart(model) {
+  const minWidth = Math.max(360, model.categories.length * 78);
+  const showValueLabels = model.categories.length <= 8;
+  const bars = model.categories
+    .map((category, categoryIndex) => {
+      const total = model.series.reduce((sum, series) => sum + Math.max(0, series.values[categoryIndex] || 0), 0);
+      const barHeight = total <= 0 ? 0 : Math.max(4, (total / model.maxValue) * 100);
+      const segments = model.series
+        .map((series) => {
+          const value = Math.max(0, series.values[categoryIndex] || 0);
+          const segmentHeight = total > 0 ? (value / total) * 100 : 0;
+          return `
+            <div
+              class="chart-bar-segment"
+              style="height:${segmentHeight}%;background:${series.color};"
+              title="${escapeText(`${series.name} · ${category}: ${value}`)}"
+            ></div>
+          `;
+        })
+        .join("");
+      return `
+        <div class="chart-category">
+          <div class="chart-bar-group">
+            <div class="chart-bar-column">
+              ${showValueLabels ? `<span class="chart-bar-value">${escapeText(formatMetric(total))}</span>` : ""}
+              <div class="chart-bar-stack" style="height:${barHeight}%;">
+                ${segments}
+              </div>
+            </div>
+          </div>
+          <div class="chart-category-label" title="${escapeText(category)}">${escapeText(category)}</div>
+        </div>
+      `;
+    })
+    .join("");
+  return `
+    <div class="chart-shell">
+      ${buildChartLegend(model.series)}
+      <div class="chart-scroll">
+        <div class="chart-scale" style="min-width:${minWidth}px;">
+          <span>${escapeText(formatMetric(model.maxValue))}</span>
+          <span>0</span>
+        </div>
+        <div class="chart-plot">
+          <div class="chart-plot-frame" style="min-width:${minWidth}px;">
+            <div class="chart-grid">${renderChartGridLines()}</div>
+            <div class="chart-bars" style="grid-template-columns:repeat(${model.categories.length}, minmax(0, 1fr));">
+              ${bars}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildLinePath(values, maxValue, width, height) {
+  const top = 16;
+  const bottom = 18;
+  const left = 16;
+  const right = 16;
+  const innerHeight = height - top - bottom;
+  const innerWidth = width - left - right;
+  return values.map((value, index) => {
+    const x =
+      values.length === 1 ? left + innerWidth / 2 : left + (innerWidth * index) / Math.max(1, values.length - 1);
+    const y = top + innerHeight - (Math.max(0, value) / Math.max(1, maxValue)) * innerHeight;
+    return { x, y };
+  });
+}
+
+function renderTailwindLineChart(model) {
+  const width = Math.max(360, model.categories.length * 78);
+  const height = 224;
+  const lines = Array.from({ length: 5 }, (_, index) => {
+    const y = 16 + ((height - 34) * index) / 4;
+    return `<line x1="0" y1="${y}" x2="${width}" y2="${y}" stroke="rgba(212,212,216,0.8)" stroke-dasharray="4 6" />`;
+  }).join("");
+  const seriesMarkup = model.series
+    .map((series) => {
+      const points = buildLinePath(series.values, model.maxValue, width, height);
+      const path = points.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.y}`).join(" ");
+      const pointNodes = points
+        .map(
+          (point, index) => `
+            <circle cx="${point.x}" cy="${point.y}" r="4" fill="${series.color}">
+              <title>${escapeText(`${series.name} · ${model.categories[index]}: ${series.values[index]}`)}</title>
+            </circle>
+          `,
+        )
+        .join("");
+      return `
+        <g>
+          <path d="${path}" fill="none" stroke="${series.color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></path>
+          ${pointNodes}
+        </g>
+      `;
+    })
+    .join("");
+  const labels = model.categories
+    .map((category) => `<div class="chart-axis-label" title="${escapeText(category)}">${escapeText(category)}</div>`)
+    .join("");
+  return `
+    <div class="chart-shell chart-line-wrap">
+      ${buildChartLegend(model.series)}
+      <div class="chart-scroll">
+        <div class="chart-scale" style="min-width:${width}px;">
+          <span>${escapeText(formatMetric(model.maxValue))}</span>
+          <span>0</span>
+        </div>
+        <svg class="chart-line-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${escapeText(model.title)}">
+          ${lines}
+          ${seriesMarkup}
+        </svg>
+        <div class="chart-axis-grid" style="min-width:${width}px;grid-template-columns:repeat(${model.categories.length}, minmax(0, 1fr));">
+          ${labels}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTailwindPieChart(model) {
+  if (model.total <= 0) {
+    return `<div class="chart-empty">暂无可绘制的数据。</div>`;
+  }
+  let offset = 0;
+  const gradient = model.segments
+    .map((segment) => {
+      const size = (Math.max(0, segment.value) / model.total) * 100;
+      const start = offset;
+      offset += size;
+      return `${segment.color} ${start.toFixed(2)}% ${offset.toFixed(2)}%`;
+    })
+    .join(", ");
+  const list = model.segments
+    .map((segment) => {
+      const percent = model.total > 0 ? (Math.max(0, segment.value) / model.total) * 100 : 0;
+      return `
+        <div class="chart-segment-item">
+          <div class="chart-segment-main">
+            <span class="chart-swatch" style="background:${segment.color};"></span>
+            <span class="chart-segment-label" title="${escapeText(segment.name)}">${escapeText(segment.name)}</span>
+          </div>
+          <div class="chart-segment-metrics">
+            <div>${escapeText(formatMetric(segment.value))}</div>
+            <div>${escapeText(formatPercent(percent))}</div>
+          </div>
+        </div>
+      `;
+    })
+    .join("");
+  return `
+    <div class="chart-shell">
+      <div class="chart-pie-layout">
+        <div class="chart-pie-wrap">
+          <div class="chart-pie" style="background:conic-gradient(${gradient});">
+            <div class="chart-pie-hole">
+              <div class="chart-pie-caption">Total</div>
+              <div class="chart-pie-total">${escapeText(formatMetric(model.total))}</div>
+            </div>
+          </div>
+        </div>
+        <div class="chart-segment-list">${list}</div>
+      </div>
+    </div>
+  `;
+}
+
+function renderTailwindChart(container, chart) {
+  const model = buildTailwindChartModel(chart);
+  if (!model) {
+    container.innerHTML = `<div class="chart-empty">当前图表规格无法用 Tailwind 模式渲染。</div>`;
+    return false;
+  }
+  if (model.type === "pie") {
+    container.innerHTML = renderTailwindPieChart(model);
+    return true;
+  }
+  if (model.type === "line") {
+    container.innerHTML = renderTailwindLineChart(model);
+    return true;
+  }
+  if (model.type === "stacked_bar") {
+    container.innerHTML = renderTailwindStackedBarChart(model);
+    return true;
+  }
+  container.innerHTML = renderTailwindBarChart(model);
+  return true;
+}
+
+function renderEchartsChart(container, chart) {
+  if (!window.echarts || !chart.option) {
+    return false;
+  }
+  const instance = window.echarts.init(container, null, { renderer: "canvas" });
+  instance.setOption(chart.option);
+  const resize = () => instance.resize();
+  if (window.ResizeObserver) {
+    const observer = new ResizeObserver(resize);
+    observer.observe(container);
+    container._chartObserver = observer;
+  }
+  container._chartInstance = instance;
+  requestAnimationFrame(resize);
+  return true;
+}
+
+function disposeChartContainer(container) {
+  if (container._chartObserver) {
+    container._chartObserver.disconnect();
+    delete container._chartObserver;
+  }
+  if (window.echarts) {
+    const instance = container._chartInstance || window.echarts.getInstanceByDom(container);
+    if (instance) {
+      instance.dispose();
+    }
+  }
+  delete container._chartInstance;
+  container.innerHTML = "";
+}
+
 function hydrateToolResults(body, toolCalls) {
   const { charts } = extractToolResults(toolCalls);
-  if (!charts.length || !window.echarts) {
+  if (!charts.length) {
     return;
   }
   const containers = Array.from(body.querySelectorAll(".chart-canvas"));
+  const metaNodes = Array.from(body.querySelectorAll("[data-chart-meta-index]"));
   containers.forEach((container, index) => {
     const chart = charts[index];
+    const meta = metaNodes[index];
     if (!chart) {
       return;
     }
-    const existing = window.echarts.getInstanceByDom(container);
-    if (existing) {
-      existing.dispose();
+    disposeChartContainer(container);
+    const renderer = resolveChartRenderer(chart);
+    if (renderer === "tailwind") {
+      renderTailwindChart(container, chart);
+    } else if (renderer === "echarts") {
+      renderEchartsChart(container, chart);
+    } else {
+      container.innerHTML = `<div class="chart-empty">当前结果缺少可渲染的图表规格。</div>`;
     }
-    const instance = window.echarts.init(container, null, { renderer: "canvas" });
-    instance.setOption(chart.option);
-    const resize = () => instance.resize();
-    if (window.ResizeObserver) {
-      const observer = new ResizeObserver(resize);
-      observer.observe(container);
-      container._chartObserver = observer;
+    if (meta) {
+      meta.textContent = buildChartMeta(chart, renderer);
     }
-    container._chartInstance = instance;
-    requestAnimationFrame(resize);
   });
 }
 
 function disposeCharts(root) {
   for (const container of root.querySelectorAll(".chart-canvas")) {
-    if (container._chartObserver) {
-      container._chartObserver.disconnect();
-      delete container._chartObserver;
-    }
-    if (window.echarts) {
-      const instance = container._chartInstance || window.echarts.getInstanceByDom(container);
-      if (instance) {
-        instance.dispose();
-      }
-    }
-    delete container._chartInstance;
+    disposeChartContainer(container);
   }
 }
 
@@ -765,9 +1229,42 @@ function resetConversation() {
   `;
 }
 
+function rerenderAssistantMessages() {
+  for (const item of document.querySelectorAll("#messages .message.assistant")) {
+    if (!item._renderState) {
+      continue;
+    }
+    const renderState = item._renderState;
+    updateAssistantMessage(
+      item,
+      renderState.text,
+      renderState.steps,
+      renderState.requestedInputs,
+      renderState.liveStream,
+      renderState.toolCalls,
+      { scroll: false },
+    );
+  }
+}
+
+function setChartRendererPreference(value, { rerender = true } = {}) {
+  state.chartRenderer = normalizeChartRenderer(value);
+  saveChartRendererPreference(state.chartRenderer);
+  if ($("chartRendererSelect")) {
+    $("chartRendererSelect").value = state.chartRenderer;
+  }
+  if (rerender) {
+    rerenderAssistantMessages();
+  }
+}
+
 function init() {
+  state.chartRenderer = loadChartRendererPreference();
   $("chatForm").addEventListener("submit", sendMessage);
   $("resetConversation").addEventListener("click", resetConversation);
+  $("chartRendererSelect").addEventListener("change", (event) => {
+    setChartRendererPreference(event.target.value);
+  });
   $("fileInput").addEventListener("change", syncSelectedFiles);
   $("workspaceInput").addEventListener("input", syncSessionMeta);
   $("messageInput").addEventListener("keydown", (event) => {
@@ -775,6 +1272,7 @@ function init() {
       $("chatForm").requestSubmit();
     }
   });
+  setChartRendererPreference(state.chartRenderer, { rerender: false });
   syncSessionMeta();
   $("messageInput").focus();
 }
