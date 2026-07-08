@@ -41,6 +41,12 @@ def test_enterprise_risk_report_registry_items_exist():
     assert "chart-spec-builder" in set(agent.skill_ids or [])
 
 
+def test_pg_skills_ship_env_examples():
+    assert Path("registry/skills/pg-risk-dataset-sync/.env.example").is_file()
+    assert Path("registry/skills/pg-report-query/.env.example").is_file()
+    assert Path("registry/skills/pg-case-search/.env.example").is_file()
+
+
 def test_pg_report_query_returns_query_plan():
     module = load_skill_module(Path("registry/skills/pg-report-query/skill.py"))
 

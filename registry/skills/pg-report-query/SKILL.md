@@ -56,6 +56,8 @@ metadata:
 
 把这个 executable skill 作为报告写作中的量化数据层。
 
+环境变量示例见同目录 `.env.example`。
+
 当前默认对接的事实表是 `enterprise_risk_events`。
 
 使用方式：

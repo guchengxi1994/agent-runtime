@@ -50,6 +50,8 @@ metadata:
 
 当报告需要从较大案例库中提取代表性案例时，把这个 executable skill 作为默认案例检索层。
 
+环境变量示例见同目录 `.env.example`。
+
 当前默认对接的结构化事实表是 `enterprise_risk_events`，可以直接从司法案件、行政处罚等记录中抽代表性案例。
 
 如果 `execute=true`：
