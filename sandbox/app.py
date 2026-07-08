@@ -146,12 +146,35 @@ def build_skill_execution_metadata(
         "workspace_id": str(context.get("workspace_id") or ""),
         "run_id": str(context.get("run_id") or ""),
         "user_id": str(context.get("user_id") or ""),
+        "tool_call_id": str(context.get("tool_call_id") or ""),
         "skill_name": str(skill.get("name") or ""),
         "entrypoint": str(skill.get("entrypoint") or "skill.py"),
         "phase": result.get("phase"),
         "elapsed_ms": int((time.monotonic() - started_at) * 1000),
         "timeout_ms": policy.get("timeout_ms"),
         "packages": policy.get("packages") or [],
+    }
+
+
+def summarize_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    keys = sorted(arguments.keys())
+    preview: dict[str, Any] = {}
+    for key in keys[:12]:
+        value = arguments.get(key)
+        if isinstance(value, str):
+            preview[key] = value[:240] + ("..." if len(value) > 240 else "")
+        elif isinstance(value, (int, float, bool)) or value is None:
+            preview[key] = value
+        elif isinstance(value, list):
+            preview[key] = {"type": "list", "length": len(value)}
+        elif isinstance(value, dict):
+            preview[key] = {"type": "object", "keys": sorted(str(item) for item in value.keys())[:12]}
+        else:
+            preview[key] = {"type": type(value).__name__}
+    return {
+        "argument_keys": keys,
+        "argument_count": len(keys),
+        "arguments_preview": preview,
     }
 
 
@@ -476,12 +499,16 @@ async def execute_skill(request: Request) -> JSONResponse:
 
     plugin_id = build_agent_plugin_id(context, skill, execution_id)
     logger.info(
-        "Execute skill request: execution_id=%s, agent_id=%s, skill=%s, packages=%s, venv_key=%s",
+        "Execute skill request: execution_id=%s, agent_id=%s, workspace_id=%s, run_id=%s, tool_call_id=%s, skill=%s, packages=%s, venv_key=%s, argument_keys=%s",
         execution_id,
         context.get("agent_id"),
+        context.get("workspace_id"),
+        context.get("run_id"),
+        context.get("tool_call_id"),
         skill.get("name"),
         policy.get("packages") or [],
         policy.get("venv_key"),
+        sorted(arguments.keys()),
     )
     async with execution_slot():
         result = await run_plugin_execute(plugin_id, script, arguments, policy)
@@ -493,6 +520,19 @@ async def execute_skill(request: Request) -> JSONResponse:
         started_at=started_at,
         policy=policy,
     )
+    result.setdefault("trace", {})
+    if isinstance(result["trace"], dict):
+        result["trace"].update(
+            {
+                "mode": "inline",
+                "skill_name": str(skill.get("name") or ""),
+                "workspace_id": str(context.get("workspace_id") or ""),
+                "conversation_id": str(context.get("conversation_id") or ""),
+                "run_id": str(context.get("run_id") or ""),
+                "tool_call_id": str(context.get("tool_call_id") or ""),
+                **summarize_arguments(arguments),
+            }
+        )
     return json_response(result)
 
 
@@ -556,7 +596,16 @@ async def execute_bundle(
     if context is not None and not is_record(parsed_context):
         return json_response({"error": "context must be a JSON object"}, 400)
 
-    logger.info("Execute bundle request: plugin_id=%s, filename=%s", plugin_id, bundle.filename)
+    logger.info(
+        "Execute bundle request: plugin_id=%s, filename=%s, workspace_id=%s, run_id=%s, tool_call_id=%s, skill=%s, argument_keys=%s",
+        plugin_id,
+        bundle.filename,
+        parsed_context.get("workspace_id") if is_record(parsed_context) else "",
+        parsed_context.get("run_id") if is_record(parsed_context) else "",
+        parsed_context.get("tool_call_id") if is_record(parsed_context) else "",
+        parsed_skill.get("name") if is_record(parsed_skill) else "",
+        sorted(parsed_params.keys()),
+    )
     execution_id = make_execution_id()
     started_at = time.monotonic()
     merged_policy = merge_execution_policy(parsed_base_policy, policy)
@@ -604,6 +653,19 @@ async def execute_bundle(
             result=result,
             started_at=started_at,
             policy=merged_policy,
+        )
+    result.setdefault("trace", {})
+    if isinstance(result["trace"], dict):
+        result["trace"].update(
+            {
+                "mode": "bundle",
+                "skill_name": str(parsed_skill.get("name") or "") if is_record(parsed_skill) else "",
+                "workspace_id": str(parsed_context.get("workspace_id") or "") if is_record(parsed_context) else "",
+                "conversation_id": str(parsed_context.get("conversation_id") or "") if is_record(parsed_context) else "",
+                "run_id": str(parsed_context.get("run_id") or "") if is_record(parsed_context) else "",
+                "tool_call_id": str(parsed_context.get("tool_call_id") or "") if is_record(parsed_context) else "",
+                **summarize_arguments(parsed_params),
+            }
         )
     return json_response(result, 200 if result.get("success") else 500)
 

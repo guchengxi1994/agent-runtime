@@ -48,17 +48,25 @@ metadata:
     execution_policy:
       timeout_ms: 60000
       idle_timeout_ms: 15000
-      packages: []
+      packages:
+        - psycopg[binary]==3.2.9
 ---
 
 # PostgreSQL 报表查询
 
 把这个 executable skill 作为报告写作中的量化数据层。
 
-当前第一阶段的现实约束：
+当前默认对接的事实表是 `enterprise_risk_events`。
 
-- schema 可能还不完整
-- DSN 可能还没配置
-- 执行能力可能暂时关闭
+使用方式：
 
-因此，即使当前没有可用的在线数据库，这个 skill 也必须返回一个有价值的查询方案，而不是直接失效。
+- 如果 `execute=false`，返回查询方案和假设。
+- 如果 `execute=true` 且 PostgreSQL 可用，会直接执行查询。
+- 如果数据库里还没有风险数据，不要伪造统计结果，应提示先调用 `pg-risk-dataset-sync`。
+
+当前内置的通用维度和指标面向企业风险数据集，适合：
+
+- 月度趋势
+- 地区、行业、所有权性质、企业规模分布
+- 司法案件与行政处罚的来源拆分
+- 案件类型和风险类型的结构分析

@@ -370,3 +370,5 @@ vite.config.ts.timestamp-*
 
 .pytest-tmp
 artifacts/
+
+*.xlsx

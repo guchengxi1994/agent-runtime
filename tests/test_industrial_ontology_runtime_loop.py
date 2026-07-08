@@ -112,9 +112,11 @@ def test_skill_execution_context_includes_workspace_id():
         workspace_id="ws_test",
         user_id="anonymous",
         run_id="run_test",
+        tool_call_id="call_test",
     )
 
     assert context.model_dump()["workspace_id"] == "ws_test"
+    assert context.model_dump()["tool_call_id"] == "call_test"
 
 
 def load_csv_rows(path: Path) -> list[dict[str, str]]:

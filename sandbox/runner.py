@@ -77,7 +77,22 @@ async def main() -> int:
             raise RuntimeError("Plugin script must define callable `execute(params)`")
 
         result = await maybe_await(execute(params))
-        print(f"{RUNNER_RESULT_PREFIX}" + json.dumps({"success": True, "data": result}, ensure_ascii=False))
+        print(
+            f"{RUNNER_RESULT_PREFIX}"
+            + json.dumps(
+                {
+                    "success": True,
+                    "data": result,
+                    "runner_trace": {
+                        "script_path": str(script_path),
+                        "payload_path": str(payload_path),
+                        "action": action,
+                        "argument_keys": sorted(params.keys()) if isinstance(params, dict) else [],
+                    },
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
     except Exception as exc:
         print(

@@ -574,6 +574,7 @@ class AgentRuntime:
                             workspace_id=conversation.workspace_id,
                             user_id=request.user.id,
                             run_id=run_id,
+                            tool_call_id=tool_call_id,
                         )
                         if skill_uses_bundle(skill):
                             result = await self.runner.execute_bundle_skill(

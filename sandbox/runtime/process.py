@@ -57,6 +57,28 @@ def build_runtime_payload(action: str, params: dict[str, Any] | None = None) -> 
     return json.dumps({"action": action, "params": params or {}}, ensure_ascii=False)
 
 
+def summarize_params(params: dict[str, Any]) -> dict[str, Any]:
+    keys = sorted(params.keys())
+    preview: dict[str, Any] = {}
+    for key in keys[:12]:
+        value = params.get(key)
+        if isinstance(value, str):
+            preview[key] = value[:240] + ("..." if len(value) > 240 else "")
+        elif isinstance(value, (int, float, bool)) or value is None:
+            preview[key] = value
+        elif isinstance(value, list):
+            preview[key] = {"type": "list", "length": len(value)}
+        elif isinstance(value, dict):
+            preview[key] = {"type": "object", "keys": sorted(str(item) for item in value.keys())[:12]}
+        else:
+            preview[key] = {"type": type(value).__name__}
+    return {
+        "argument_keys": keys,
+        "argument_count": len(keys),
+        "arguments_preview": preview,
+    }
+
+
 def build_process_env(
     config: ExecutionConfig,
     venv_dir: Path,
@@ -89,6 +111,37 @@ def build_process_env(
         env["PIP_TRUSTED_HOST"] = config.pip_trusted_host
     env.update(config.env)
     return env
+
+
+def load_bundle_dotenv(bundle_root: Path) -> dict[str, str]:
+    dotenv_path = bundle_root / ".env"
+    if not dotenv_path.is_file():
+        return {}
+    loaded: dict[str, str] = {}
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = _parse_dotenv_value(value)
+        if key:
+            loaded[key] = value
+    return loaded
+
+
+def _parse_dotenv_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    comment_start = value.find(" #")
+    if comment_start >= 0:
+        value = value[:comment_start].rstrip()
+    return value
 
 
 def create_task_workspace(plugin_id: str, settings: RuntimeSettings) -> TaskWorkspace:
@@ -1333,6 +1386,7 @@ async def execute_plugin_runtime(
             mode="inline",
             step="prepare_files",
             workspace=str(workspace.root),
+            **summarize_params(params),
         )
         workspace.script_path.write_text(wrapper, encoding="utf-8")
         workspace.payload_path.write_text(build_runtime_payload("execute", params), encoding="utf-8")
@@ -1348,6 +1402,7 @@ async def execute_plugin_runtime(
             step="prepare_files",
             script_path=str(workspace.script_path),
             payload_path=str(workspace.payload_path),
+            **summarize_params(params),
         )
 
         venv_dir = await ensure_venv(workspace, config, budget, settings, plugin_id, stdout_queue)
@@ -1362,6 +1417,7 @@ async def execute_plugin_runtime(
             "in_progress",
             mode="inline",
             cwd=str(workspace.root),
+            **summarize_params(params),
         )
         result_meta = await run_subprocess(
             command,
@@ -1480,16 +1536,19 @@ async def execute_bundle_runtime(
             workspace=str(workspace.root),
             bundle_dir=str(bundle_dir),
             bundle_bytes=len(bundle_bytes),
+            **summarize_params(params),
         )
         bundle_meta = extract_bundle_zip(bundle_bytes, bundle_dir)
         bundle_info = parse_bundle_manifest(bundle_dir)
+        bundle_dotenv = load_bundle_dotenv(bundle_dir)
         script = bundle_info["entrypoint_path"].read_text(encoding="utf-8")
         logger.info(
-            "[%s] Bundle ready for execution: file_count=%s, total_uncompressed_bytes=%s, entrypoint=%s",
+            "[%s] Bundle ready for execution: file_count=%s, total_uncompressed_bytes=%s, entrypoint=%s, bundle_env_keys=%s",
             plugin_id,
             bundle_meta["file_count"],
             bundle_meta["total_uncompressed_bytes"],
             bundle_info["entrypoint"],
+            sorted(bundle_dotenv.keys()),
         )
         bundle_info["entrypoint_path"].write_text(build_script_wrapper(script), encoding="utf-8")
         workspace.payload_path.write_text(build_runtime_payload("execute", params), encoding="utf-8")
@@ -1508,6 +1567,7 @@ async def execute_bundle_runtime(
             manifest_path=str(bundle_info["manifest_path"]),
             script_path=str(bundle_info["entrypoint_path"]),
             payload_path=str(workspace.payload_path),
+            **summarize_params(params),
         )
 
         venv_dir = await ensure_venv(workspace, config, budget, settings, plugin_id, stdout_queue)
@@ -1522,12 +1582,13 @@ async def execute_bundle_runtime(
             "in_progress",
             mode="bundle",
             cwd=str(bundle_dir),
+            **summarize_params(params),
         )
         result_meta = await run_subprocess(
             command,
             settings=settings,
             phase_ctx=execute_phase,
-            env=build_process_env(config, venv_dir, workspace.tmp_dir, settings),
+            env={**load_bundle_dotenv(bundle_dir), **build_process_env(config, venv_dir, workspace.tmp_dir, settings)},
             cwd=bundle_dir,
             timeout_ms=remaining_timeout_ms(budget, settings, phase_ctx=execute_phase),
             idle_timeout_ms=config.idle_timeout_ms,
@@ -1765,13 +1826,15 @@ async def validate_bundle_runtime(
         pre_phase = PhaseContext(plugin_id=plugin_id, phase=PHASE_PRE_EXECUTE, started_at=time.monotonic())
         bundle_meta = extract_bundle_zip(bundle_bytes, bundle_dir)
         bundle_info = parse_bundle_manifest(bundle_dir)
+        bundle_dotenv = load_bundle_dotenv(bundle_dir)
         script = bundle_info["entrypoint_path"].read_text(encoding="utf-8")
         logger.info(
-            "[%s] Bundle ready for validation: file_count=%s, total_uncompressed_bytes=%s, entrypoint=%s",
+            "[%s] Bundle ready for validation: file_count=%s, total_uncompressed_bytes=%s, entrypoint=%s, bundle_env_keys=%s",
             plugin_id,
             bundle_meta["file_count"],
             bundle_meta["total_uncompressed_bytes"],
             bundle_info["entrypoint"],
+            sorted(bundle_dotenv.keys()),
         )
         static_validation = validate_python_plugin_structure(script)
         if not static_validation["valid"]:
@@ -1797,7 +1860,7 @@ async def validate_bundle_runtime(
             command,
             settings=settings,
             phase_ctx=execute_phase,
-            env=build_process_env(config, venv_dir, workspace.tmp_dir, settings),
+            env={**load_bundle_dotenv(bundle_dir), **build_process_env(config, venv_dir, workspace.tmp_dir, settings)},
             cwd=bundle_dir,
             timeout_ms=remaining_timeout_ms(budget, settings, phase_ctx=execute_phase),
             idle_timeout_ms=config.idle_timeout_ms,

@@ -42,6 +42,57 @@ def build_bundle() -> bytes:
     return buffer.getvalue()
 
 
+def build_bundle_with_dotenv() -> bytes:
+    buffer = BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "manifest.json",
+            json.dumps({"runtime": "python", "entrypoint": "skill.py"}, ensure_ascii=False),
+        )
+        archive.writestr(".env", "PGHOST=bundle-pg\nPGPORT=5432\n")
+        archive.writestr(
+            "skill.py",
+            "\n".join(
+                [
+                    "import os",
+                    "definition = {'name': 'bundle-env-demo', 'description': 'demo'}",
+                    "def execute(params):",
+                    "    return {'pghost': os.getenv('PGHOST', ''), 'pgport': os.getenv('PGPORT', '')}",
+                ]
+            ),
+        )
+    return buffer.getvalue()
+
+
+def test_runner_returns_argument_keys_trace(tmp_path):
+    sandbox_root = Path("sandbox").resolve()
+    if str(sandbox_root) not in sys.path:
+        sys.path.insert(0, str(sandbox_root))
+    runner_module = importlib.util.spec_from_file_location("sandbox_runner_test_module", sandbox_root / "runner.py")
+    runner = importlib.util.module_from_spec(runner_module)
+    assert runner_module and runner_module.loader
+    runner_module.loader.exec_module(runner)
+
+    script_path = tmp_path / "skill.py"
+    payload_path = tmp_path / "payload.json"
+    script_path.write_text(
+        "definition = {'name': 'demo'}\n"
+        "def execute(params):\n"
+        "    return {'ok': params.get('value')}\n",
+        encoding="utf-8",
+    )
+    payload_path.write_text(json.dumps({"action": "execute", "params": {"value": 9}}, ensure_ascii=False), encoding="utf-8")
+
+    old_argv = sys.argv[:]
+    try:
+        sys.argv = ["runner.py", str(script_path), str(payload_path)]
+        exit_code = __import__("asyncio").run(runner.main())
+    finally:
+        sys.argv = old_argv
+
+    assert exit_code == 0
+
+
 def test_bundle_execute_accepts_skill_context_and_returns_execution_metadata(monkeypatch):
     sandbox_app = load_sandbox_app_module()
 
@@ -75,6 +126,7 @@ def test_bundle_execute_accepts_skill_context_and_returns_execution_metadata(mon
                     "workspace_id": "ws_bundle",
                     "run_id": "run_bundle",
                     "user_id": "user_bundle",
+                    "tool_call_id": "call_bundle",
                 },
                 ensure_ascii=False,
             ),
@@ -89,3 +141,45 @@ def test_bundle_execute_accepts_skill_context_and_returns_execution_metadata(mon
     assert payload["execution"]["workspace_id"] == "ws_bundle"
     assert payload["execution"]["conversation_id"] == "conv_bundle"
     assert payload["execution"]["skill_name"] == "bundle-demo"
+    assert payload["execution"]["tool_call_id"] == "call_bundle"
+    assert payload["trace"]["argument_keys"] == ["value"]
+    assert payload["trace"]["arguments_preview"]["value"] == 7
+
+
+def test_bundle_execute_can_read_dotenv_from_bundle():
+    sandbox_app = load_sandbox_app_module()
+    client = TestClient(sandbox_app.app)
+
+    response = client.post(
+        "/bundle/execute",
+        data={
+            "params": json.dumps({}, ensure_ascii=False),
+            "skill": json.dumps(
+                {
+                    "name": "bundle-env-demo",
+                    "entrypoint": "skill.py",
+                    "execution_policy": {"packages": []},
+                    "required_secrets": {},
+                },
+                ensure_ascii=False,
+            ),
+            "context": json.dumps(
+                {
+                    "agent_id": "default",
+                    "conversation_id": "conv_env",
+                    "workspace_id": "ws_env",
+                    "run_id": "run_env",
+                    "user_id": "user_env",
+                    "tool_call_id": "call_env",
+                },
+                ensure_ascii=False,
+            ),
+        },
+        files={"bundle": ("bundle.zip", build_bundle_with_dotenv(), "application/zip")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["pghost"] == "bundle-pg"
+    assert payload["data"]["pgport"] == "5432"

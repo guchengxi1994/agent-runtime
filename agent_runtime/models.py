@@ -158,6 +158,7 @@ class SkillExecutionContext(BaseModel):
     workspace_id: str
     user_id: str
     run_id: str
+    tool_call_id: str | None = None
 
 
 class SkillExecutionRequest(BaseModel):

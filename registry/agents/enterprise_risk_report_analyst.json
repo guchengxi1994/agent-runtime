@@ -5,6 +5,7 @@
   "enabled": true,
   "skill_ids": [
     "enterprise-risk-report",
+    "pg-risk-dataset-sync",
     "case-library-review",
     "pg-case-search",
     "pg-report-query",
@@ -15,6 +16,7 @@
   ],
   "capability_hints": [
     "结构化报告生成",
+    "PostgreSQL 数据初始化",
     "法律风险分析",
     "图表化报告输出",
     "数据库优先的案例检索"

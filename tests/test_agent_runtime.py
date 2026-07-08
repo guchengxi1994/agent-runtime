@@ -131,6 +131,40 @@ def test_skill_uses_bundle_when_directory_has_extra_files(tmp_path):
     assert bundle
 
 
+def test_build_skill_bundle_includes_dotenv_when_present(tmp_path):
+    settings = make_settings(tmp_path)
+    write_skill(
+        settings.registry_dir / "skills" / "dotenv-skill",
+        name="dotenv-skill",
+        body="Read dotenv from bundle.",
+        runtime_metadata="""  agent_runtime:
+    executable: true
+    entrypoint: skill.py
+    parameters_schema:
+      type: object
+      properties: {}
+      additionalProperties: false
+""",
+    )
+    skill_dir = settings.registry_dir / "skills" / "dotenv-skill"
+    skill_dir.joinpath("skill.py").write_text(
+        "definition = {'name': 'dotenv-skill'}\ndef execute(params):\n    return {'ok': True}\n",
+        encoding="utf-8",
+    )
+    skill_dir.joinpath(".env").write_text("PGHOST=pg.local\n", encoding="utf-8")
+
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    skill = registry.skills["dotenv-skill"]
+    bundle = build_skill_bundle(skill)
+
+    import zipfile
+    from io import BytesIO
+
+    with zipfile.ZipFile(BytesIO(bundle), "r") as archive:
+        assert ".env" in archive.namelist()
+
+
 def test_skill_uses_inline_when_only_entrypoint_exists(tmp_path):
     settings = make_settings(tmp_path)
     write_skill(

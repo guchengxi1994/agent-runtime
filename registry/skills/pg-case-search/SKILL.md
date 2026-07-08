@@ -42,18 +42,21 @@ metadata:
     execution_policy:
       timeout_ms: 60000
       idle_timeout_ms: 15000
-      packages: []
+      packages:
+        - psycopg[binary]==3.2.9
 ---
 
 # PostgreSQL 案例检索
 
 当报告需要从较大案例库中提取代表性案例时，把这个 executable skill 作为默认案例检索层。
 
-当前第一阶段的现实约束：
+当前默认对接的结构化事实表是 `enterprise_risk_events`，可以直接从司法案件、行政处罚等记录中抽代表性案例。
 
-- PostgreSQL schema 可能仍在演进
-- 线上 DSN 可能暂时不存在
-- 即使无法直接执行，结果也应该仍然能作为可用的检索规划
+如果 `execute=true`：
+
+- 数据已入库时，直接执行检索。
+- 数据未入库或表为空时，提示先调用 `pg-risk-dataset-sync`。
+- 如果只是先做报告规划，继续使用 plan_only 结果即可。
 
 如果暂时无法在线执行，至少返回：
 

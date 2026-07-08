@@ -1,2 +1,2 @@
-// docker build -t artisan-plugin-python:{version} .
-v0.0.1  // fastapi;uvicorn;bundle;stateless
+// docker build -t sandbox:{version} .
+v0.1.0  // fastapi;uvicorn;bundle;stateless

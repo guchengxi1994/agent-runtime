@@ -95,10 +95,13 @@ def build_skill_bundle(skill: SkillDefinition) -> bytes:
     root = Path(skill.skill_dir).resolve()
     entrypoint = skill.entrypoint.strip().replace("\\", "/")
     bundle_paths = {entrypoint}
+    dotenv_path = root / ".env"
     for resource in skill.resources:
         relative = resource.path.strip().replace("\\", "/")
         if relative and relative != "manifest.json":
             bundle_paths.add(relative)
+    if dotenv_path.is_file():
+        bundle_paths.add(".env")
 
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -121,4 +124,3 @@ def build_skill_bundle(skill: SkillDefinition) -> bytes:
                 continue
             archive.write(path, arcname=relative)
     return buffer.getvalue()
-

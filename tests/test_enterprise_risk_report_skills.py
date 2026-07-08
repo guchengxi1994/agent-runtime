@@ -20,6 +20,9 @@ def test_enterprise_risk_report_registry_items_exist():
 
     assert "enterprise-risk-report" in registry.skills
     assert registry.skills["enterprise-risk-report"].executable is False
+    assert "pg-risk-dataset-sync" in registry.skills
+    assert registry.skills["pg-risk-dataset-sync"].executable is True
+    assert any(resource.path.endswith(".xlsx") for resource in registry.skills["pg-risk-dataset-sync"].resources)
     assert "case-library-review" in registry.skills
     assert registry.skills["case-library-review"].executable is False
     assert "pg-case-search" in registry.skills
@@ -31,6 +34,7 @@ def test_enterprise_risk_report_registry_items_exist():
 
     agent = registry.get_agent("enterprise_risk_report_analyst")
     assert "enterprise-risk-report" in set(agent.skill_ids or [])
+    assert "pg-risk-dataset-sync" in set(agent.skill_ids or [])
     assert "case-library-review" in set(agent.skill_ids or [])
     assert "pg-case-search" in set(agent.skill_ids or [])
     assert "pg-report-query" in set(agent.skill_ids or [])
@@ -53,7 +57,7 @@ def test_pg_report_query_returns_query_plan():
     assert result["success"] is True
     assert result["mode"] == "plan_only"
     assert "FROM enterprise_risk_events" in result["sql"]
-    assert "GROUP BY month, risk_type" in result["sql"]
+    assert "GROUP BY 1, 2" in result["sql"]
 
 
 def test_pg_case_search_returns_retrieval_plan():
@@ -70,9 +74,25 @@ def test_pg_case_search_returns_retrieval_plan():
 
     assert result["success"] is True
     assert result["mode"] == "plan_only"
-    assert "FROM case_library" in result["sql"]
+    assert "FROM enterprise_risk_events" in result["sql"]
     assert "illegal_subcontracting" in result["sql"]
     assert any("违规分包导致工程款回收风险" in item for item in result["shortlist_guidance"])
+
+
+def test_pg_risk_dataset_sync_dry_run_reads_bundled_excel_files(monkeypatch):
+    module = load_skill_module(Path("registry/skills/pg-risk-dataset-sync/skill.py"))
+    monkeypatch.delenv("PG_RISK_DATA_DIR", raising=False)
+
+    result = module.execute({"dry_run": True})
+
+    assert result["success"] is True
+    assert result["mode"] == "dry_run"
+    assert result["files_seen"] == 4
+    assert result["rows_read"] == 11108
+    assert result["distinct_rows"] == 11107
+    assert result["duplicate_rows_in_input"] == 1
+    assert any(item["event_source"] == "judicial_case" for item in result["file_summaries"])
+    assert any(item["event_source"] == "administrative_penalty" for item in result["file_summaries"])
 
 
 def test_chart_spec_builder_returns_echarts_option():
