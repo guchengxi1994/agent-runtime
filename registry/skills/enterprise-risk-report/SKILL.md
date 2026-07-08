@@ -54,7 +54,7 @@ metadata:
 ## 必要路由
 
 1. 先激活并阅读 `references/report-structure.md`。
-2. 如果任务依赖本地结构化司法案件、行政处罚等 Excel 数据，而 PostgreSQL 未确认已有数据，先调用 `pg-risk-dataset-sync`。它负责建表、判重和幂等导入，不应删库重建。
+2. 如果任务依赖本地结构化司法案件、行政处罚等 Excel 数据，而 PostgreSQL 未确认已有数据，先调用 `pg-risk-dataset-sync`。默认不要追问数据路径；应先按它的默认规则使用环境变量目录或 skill 自带 `assets/input/`，只有用户明确要求切换数据集，或默认目录也没有可读文件时才追问。它负责建表、判重和幂等导入，不应删库重建。
 3. 在正式写 SQL 或执行 `pg-report-query` 之前，先调用 `pg-table-profile`，确认真实列名、字段类型和低基数字段取值；不要凭空猜列名。
 4. 如果需要量化指标、总量、趋势或交叉分析，调用 `pg-report-query`。
 5. 如果需要从结构化案件中抽取代表性案例，优先调用 `pg-case-search`。
@@ -79,6 +79,7 @@ metadata:
    - 只有当用户明确要求“单家企业专项报告”“某企业深度画像”“某企业异常诊断”时，才进入企业级专项报告模式
 2. 检查数据是否已经可用：
    - 如果 PG 中缺少 `enterprise_risk_events` 或行数为 0，先调用 `pg-risk-dataset-sync`
+   - 在上述默认导数场景下，不要因为缺少 `data_dir` 就先调用 `request_user_input`
    - 如果查询 skill 返回 `missing_dataset`，立即回退到同步步骤再重试
 3. 先理解数据表本身：
    - 调用 `pg-table-profile`
