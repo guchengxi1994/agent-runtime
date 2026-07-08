@@ -64,6 +64,28 @@ def test_pg_report_query_returns_query_plan():
     assert result["mode"] == "plan_only"
     assert "FROM enterprise_risk_events" in result["sql"]
     assert "GROUP BY 1, 2" in result["sql"]
+    assert "region = '天宁区'" not in result["sql"]
+    assert result["filters"] == {"accepted_date_from": "2025-01-01"}
+
+
+def test_pg_report_query_treats_tianning_as_dataset_scope_and_aggregates_region():
+    module = load_skill_module(Path("registry/skills/pg-report-query/skill.py"))
+
+    result = module.execute(
+        {
+            "report_question": "统计2025年天宁区各街道行政处罚数量并生成柱状图",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["mode"] == "plan_only"
+    assert result["dimensions"] == ["region"]
+    assert result["filters"]["event_source"] == "administrative_penalty"
+    assert result["filters"]["year"] == 2025
+    assert "region ILIKE" not in result["sql"]
+    assert "region = '天宁区'" not in result["sql"]
+    assert "GROUP BY 1" in result["sql"]
+    assert any("dataset scope" in note for note in result["planning_notes"])
 
 
 def test_pg_report_query_infers_aggregation_and_chart_plan_from_question():
@@ -106,6 +128,8 @@ def test_pg_case_search_returns_retrieval_plan():
     assert result["mode"] == "plan_only"
     assert "FROM enterprise_risk_events" in result["sql"]
     assert "illegal_subcontracting" in result["sql"]
+    assert "region = '常州'" not in result["sql"]
+    assert result["filters"] == {"year": "2025"}
     assert any("违规分包导致工程款回收风险" in item for item in result["shortlist_guidance"])
 
 

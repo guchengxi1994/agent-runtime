@@ -11,6 +11,13 @@ from datetime import date, datetime
 DEFAULT_TABLE = "enterprise_risk_events"
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 1000
+DATASET_SCOPE_REGION_TERMS = (
+    "常州市天宁区",
+    "常州天宁区",
+    "天宁区",
+    "常州市",
+    "常州",
+)
 
 DIMENSION_SPECS = {
     "month": {
@@ -294,6 +301,7 @@ def _resolve_query_request(
     resolved_filters = dict(filters)
 
     _infer_filters(question, resolved_filters, planning_notes)
+    _normalize_scope_filters(resolved_filters, planning_notes)
 
     resolved_dimensions = list(dimensions)
     if not resolved_dimensions:
@@ -366,7 +374,7 @@ def _infer_dimensions(question):
         ("month", ["按月", "每月", "月度", "月份", "趋势"]),
         ("year", ["按年", "每年", "年度", "年份"]),
         ("industry", ["行业", "各行业"]),
-        ("region", ["区域", "地区", "属地"]),
+        ("region", ["区域", "地区", "属地", "街道", "镇", "乡", "板块", "园区"]),
         ("ownership_nature", ["所有权性质"]),
         ("company_size", ["企业规模", "规模"]),
         ("org_form", ["组织形式"]),
@@ -428,12 +436,28 @@ def _infer_filters(question, filters, planning_notes):
             filters["accepted_date_to"] = f"{end_year}-12-31"
             planning_notes.append(f"inferred date range {start_year}-01-01 to {end_year}-12-31")
 
-    if "region_contains" not in filters:
-        for candidate in ["天宁区", "常州市", "常州"]:
-            if candidate in question:
-                filters["region_contains"] = candidate
-                planning_notes.append(f"inferred region_contains={candidate}")
-                break
+    for candidate in DATASET_SCOPE_REGION_TERMS:
+        if candidate in question:
+            planning_notes.append(
+                f"treated {candidate} as dataset scope rather than a region filter; aggregate region as subdistrict/street"
+            )
+            break
+
+
+def _normalize_scope_filters(filters, planning_notes):
+    explicit_region = str(filters.get("region") or "").strip()
+    if explicit_region in DATASET_SCOPE_REGION_TERMS:
+        filters.pop("region", None)
+        planning_notes.append(
+            f"removed region={explicit_region} because the dataset is already scoped to TianNing and region is used for street-level aggregation"
+        )
+
+    explicit_region_contains = str(filters.get("region_contains") or "").strip()
+    if explicit_region_contains in DATASET_SCOPE_REGION_TERMS:
+        filters.pop("region_contains", None)
+        planning_notes.append(
+            f"removed region_contains={explicit_region_contains} because the dataset scope is already TianNing"
+        )
 
 
 def _infer_top_n(question):
@@ -561,7 +585,7 @@ def _build_assumptions(metrics, dimensions, filters, table_hints, planning_notes
     if not dimensions:
         assumptions.append("No dimensions were provided; the query plan is not grouped.")
     if not filters:
-        assumptions.append("No filters were provided; the plan is broad and may need time-range or region constraints.")
+        assumptions.append("No filters were provided; the plan is broad and may need time-range or category constraints.")
     assumptions.extend(planning_notes[:8])
     return assumptions
 

@@ -9,6 +9,13 @@ from datetime import date, datetime
 
 
 DEFAULT_TABLE = "enterprise_risk_events"
+DATASET_SCOPE_REGION_TERMS = (
+    "常州市天宁区",
+    "常州天宁区",
+    "天宁区",
+    "常州市",
+    "常州",
+)
 OUTPUT_COLUMNS = [
     "event_source",
     "company_name",
@@ -38,7 +45,12 @@ def execute(params):
     if not query and not tags and not filters:
         raise ValueError("query, tags, or filters is required")
 
+    normalized_filters = dict(filters)
+    scope_assumptions = _normalize_scope_filters(normalized_filters)
+    filters = normalized_filters
+
     sql, assumptions = _build_sql(query, tags, filters, sort_by, limit)
+    assumptions = assumptions + scope_assumptions
     result = {
         "success": True,
         "mode": "plan_only",
@@ -225,8 +237,25 @@ def _build_sql(query, tags, filters, sort_by, limit):
     if not tags:
         assumptions.append("No tags were provided; semantic retrieval relies on the query text or filters.")
     if not filters:
-        assumptions.append("No structured filters were provided; the shortlist may mix regions, years, or industries.")
+        assumptions.append("No structured filters were provided; the shortlist may mix streets/subdistricts, years, or industries.")
     return sql, assumptions
+
+
+def _normalize_scope_filters(filters):
+    assumptions = []
+    explicit_region = str(filters.get("region") or "").strip()
+    if explicit_region in DATASET_SCOPE_REGION_TERMS:
+        filters.pop("region", None)
+        assumptions.append(
+            f"Treat region={explicit_region} as dataset scope only; region values inside the dataset represent TianNing subdistricts/streets."
+        )
+    explicit_region_contains = str(filters.get("region_contains") or "").strip()
+    if explicit_region_contains in DATASET_SCOPE_REGION_TERMS:
+        filters.pop("region_contains", None)
+        assumptions.append(
+            f"Treat region_contains={explicit_region_contains} as dataset scope only; do not use it as an extra SQL filter."
+        )
+    return assumptions
 
 
 def _shortlist_guidance(query, tags, filters):

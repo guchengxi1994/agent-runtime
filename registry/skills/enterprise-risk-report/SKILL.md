@@ -49,6 +49,7 @@ metadata:
    - covered_date_range
    - covered_region_or_organization
    - available_data_sources
+   - 如果当前使用的是这批天宁区企业风险数据，要把 `天宁区` 视为数据全集范围，而不是再作为 `region` 过滤条件；区内地区分析默认指街道、板块、园区等更细粒度属地
 2. 检查数据是否已经可用：
    - 如果 PG 中缺少 `enterprise_risk_events` 或行数为 0，先调用 `pg-risk-dataset-sync`
    - 如果查询 skill 返回 `missing_dataset`，立即回退到同步步骤再重试
