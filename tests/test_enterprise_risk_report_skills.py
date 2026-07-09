@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from agent_runtime.registry import FileRegistry
 
 
@@ -35,6 +37,8 @@ def test_enterprise_risk_report_registry_items_exist():
     assert registry.skills["pg-report-query"].executable is True
     assert "chart-spec-builder" in registry.skills
     assert registry.skills["chart-spec-builder"].executable is True
+    assert "qwen-web-analysis" in registry.skills
+    assert registry.skills["qwen-web-analysis"].executable is True
 
     agent = registry.get_agent("enterprise_risk_report_analyst")
     assert "enterprise-risk-report" in set(agent.skill_ids or [])
@@ -45,6 +49,9 @@ def test_enterprise_risk_report_registry_items_exist():
     assert "pg-case-search" in set(agent.skill_ids or [])
     assert "pg-report-query" in set(agent.skill_ids or [])
     assert "chart-spec-builder" in set(agent.skill_ids or [])
+    assert "qwen-web-analysis" in set(agent.skill_ids or [])
+    assert "web-search" not in set(agent.skill_ids or [])
+    assert "web-fetch" not in set(agent.skill_ids or [])
 
 
 def test_enterprise_risk_report_writer_has_style_reference():
@@ -56,6 +63,14 @@ def test_enterprise_risk_report_writer_has_style_reference():
     writer_text = skill_path.read_text(encoding="utf-8")
     assert "style-profile.md" in writer_text
     assert "不要在开头追问目标企业" in writer_text
+    assert "联网分析只是补强项，不是必需项" in writer_text
+    assert "正文不写未纳入清单" in writer_text
+    assert "不要单列“数据局限说明”" in writer_text
+    assert "风险成因深层分析" in writer_text
+    assert "治理意见建议" in writer_text
+    assert "检察机关/检察院视角" in writer_text
+    assert "党委政府主责" in writer_text
+    assert "检察履职协同" in writer_text
 
 
 def test_enterprise_risk_report_defaults_to_district_wide_scope():
@@ -70,6 +85,34 @@ def test_pg_skills_ship_env_examples():
     assert Path("registry/skills/pg-report-query/.env.example").is_file()
     assert Path("registry/skills/pg-case-search/.env.example").is_file()
     assert Path("registry/skills/pg-table-profile/.env.example").is_file()
+    assert Path("registry/skills/qwen-web-analysis/.env.example").is_file()
+
+
+def test_enterprise_risk_report_limits_network_analysis_usage():
+    skill_text = Path("registry/skills/enterprise-risk-report/SKILL.md").read_text(encoding="utf-8")
+
+    assert "整份报告通常最多调用 2 次" in skill_text
+    assert "每次都必须显式指定模式" in skill_text
+    assert "不要再串联 `web-search`、`web-fetch`" in skill_text
+    assert "直接忽略，不要阻塞报告成稿" in skill_text
+    assert "只有同时满足以下条件时才应触发" in skill_text
+    assert "出现以下情况时不应触发" in skill_text
+    assert "mode=recommend" in skill_text
+    assert "如果最终成稿保留 `风险成因深层分析` 章节" in skill_text
+    assert "如果最终成稿保留 `治理意见建议` 章节" in skill_text
+
+
+def test_enterprise_risk_report_avoids_limitations_and_planning_sections():
+    harness_text = Path("registry/skills/enterprise-risk-report/SKILL.md").read_text(encoding="utf-8")
+    writer_text = Path("registry/skills/enterprise-risk-report-writer/SKILL.md").read_text(encoding="utf-8")
+    reference_text = Path("registry/skills/enterprise-risk-report/references/report-structure.md").read_text(encoding="utf-8")
+
+    assert "不要单列“数据局限说明”" in harness_text
+    assert "不要单列“数据局限说明”" in writer_text
+    assert "不要默认单列“数据局限说明”" in reference_text
+    assert "后续规划" in writer_text
+    assert "风险成因深层分析" in reference_text
+    assert "治理意见建议" in reference_text
 
 
 def test_pg_report_query_returns_query_plan():
@@ -366,3 +409,184 @@ def test_chart_spec_builder_reports_missing_numeric_field_for_pie():
         assert "y_fields is required for pie charts" in str(exc)
     else:
         raise AssertionError("expected pie chart field inference to fail when no numeric column exists")
+
+
+def test_qwen_web_analysis_requires_model_env(monkeypatch):
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AGENT_RUNTIME_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY"):
+        module.execute({"question": "为什么某类行业更集中"})
+
+
+def test_qwen_web_analysis_prompt_constrains_to_one_core_question():
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+
+    prompt = module.build_analysis_prompt(
+        mode="explain",
+        question="为什么某类行业更集中，这对治理资源配置意味着什么？",
+        evidence_summary="行业前五合计占比超过六成，头部行业明显集中。",
+        recommendation_focus="",
+        institution_perspective="procuratorate",
+        analysis_scope="天宁区企业涉法涉诉案件",
+        region="天宁区",
+        time_range="2025年",
+        answer_language="zh-CN",
+    )
+
+    assert "本次只围绕一个核心问题展开" in prompt
+    assert "不要拆成多个并列搜索任务" in prompt
+    assert "不要把已经给出的数字、排序、占比重新上网核对一遍" in prompt
+    assert "每个部分尽量写成 1-2 个完整自然段" in prompt
+
+
+def test_qwen_web_analysis_recommend_mode_prompt_is_explicit():
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+
+    prompt = module.build_analysis_prompt(
+        mode="recommend",
+        question="针对天宁区涉企案件最集中的商贸服务业，下一步有哪些可借鉴治理做法？",
+        evidence_summary="商贸服务业涉企案件数量居首，头部集中度明显。",
+        recommendation_focus="商贸服务业高频涉诉治理",
+        institution_perspective="procuratorate",
+        analysis_scope="天宁区企业涉法涉诉案件",
+        region="天宁区",
+        time_range="2025年",
+        answer_language="zh-CN",
+    )
+
+    assert "分析模式：recommend" in prompt
+    assert "党委政府主责" in prompt
+    assert "检察履职协同" in prompt
+    assert "建议聚焦：商贸服务业高频涉诉治理" in prompt
+    assert "机构口径：procuratorate" in prompt
+
+
+def test_qwen_web_analysis_uses_faster_default_timeout(monkeypatch):
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("AGENT_RUNTIME_MODEL", "qwen-plus")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
+    monkeypatch.delenv("QWEN_WEB_ANALYSIS_MODEL_TIMEOUT_SECONDS", raising=False)
+
+    config = module.load_model_config()
+
+    assert config["timeout_seconds"] == 75
+
+
+def test_qwen_web_analysis_rejects_invalid_mode():
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+
+    with pytest.raises(ValueError, match="mode must be one of"):
+        module.execute({"mode": "auto", "question": "test"})
+
+
+def test_qwen_web_analysis_rejects_invalid_institution_perspective():
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+
+    with pytest.raises(ValueError, match="institution_perspective must be one of"):
+        module.execute({"mode": "recommend", "question": "test", "institution_perspective": "custom"})
+
+
+def test_qwen_web_analysis_truncates_long_inputs():
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+
+    question, question_truncated = module.truncate_text("q" * 700, module.MAX_QUESTION_CHARS)
+    evidence, evidence_truncated = module.truncate_text("e" * 5000, module.MAX_EVIDENCE_CHARS)
+
+    assert question_truncated is True
+    assert evidence_truncated is True
+    assert len(question) == module.MAX_QUESTION_CHARS
+    assert len(evidence) == module.MAX_EVIDENCE_CHARS
+    assert question.endswith("…")
+    assert evidence.endswith("…")
+
+
+def test_qwen_web_analysis_executes_with_mocked_search_and_model(monkeypatch):
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("AGENT_RUNTIME_MODEL", "qwen-plus")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://example.com/v1")
+
+    monkeypatch.setattr(
+        module,
+        "call_dashscope_native_search",
+        lambda *args, **kwargs: {
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {
+                        "content": "## 核心判断\n天宁街道案件压力更高，主要与企业密度、商事活动强度和纠纷暴露渠道集中有关。[1]\n\n## 治理启示\n应优先向高负荷板块倾斜商事调解和法治服务资源。[1]",
+                        "annotations": [
+                            {
+                                "title": "天宁区营商环境观察",
+                                "url": "https://example.com/a",
+                                "description": "核心商圈企业密集、商事活动频繁，纠纷更易集中。",
+                            }
+                        ],
+                    },
+                }
+            ]
+        },
+    )
+
+    result = module.execute(
+        {
+            "mode": "explain",
+            "question": "为什么天宁街道案件压力更高，这对治理资源配置意味着什么？",
+            "evidence_summary": "天宁街道案件 4066 条，占比 36.6%，显著高于其他板块。",
+            "analysis_scope": "天宁区企业涉法涉诉案件",
+            "region": "天宁区",
+            "time_range": "2020-12 至 2026-01",
+        }
+    )
+
+    assert result["success"] is True
+    assert result["mode"] == "dashscope_native_search"
+    assert result["analysis_mode"] == "explain"
+    assert result["search_enabled"] is True
+    assert "核心判断" in result["answer_markdown"]
+    assert "参考来源" in result["answer_markdown"]
+    assert result["sources"][0]["url"] == "https://example.com/a"
+    assert result["timings_ms"]["total"] >= 0
+    assert result["finish_reason"] == "stop"
+
+
+def test_qwen_web_analysis_uses_dashscope_native_search_flag(monkeypatch):
+    module = load_skill_module(Path("registry/skills/qwen-web-analysis/skill.py"))
+
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(module.requests, "post", fake_post)
+
+    payload = module.call_dashscope_native_search(
+        {
+            "api_key": "test-key",
+            "model": "qwen-plus",
+            "base_url": "https://example.com/v1",
+            "timeout_seconds": 90,
+        },
+        messages=[{"role": "user", "content": "test"}],
+        temperature=0.3,
+        max_tokens=1000,
+    )
+
+    assert payload["choices"][0]["message"]["content"] == "ok"
+    assert captured["url"] == "https://example.com/v1/chat/completions"
+    assert captured["json"]["enable_search"] is True

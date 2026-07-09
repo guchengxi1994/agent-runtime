@@ -190,6 +190,7 @@ async def chat_stream(http_request: Request) -> StreamingResponse:
 
     async def event_stream():
         queue: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        heartbeat_seconds = 10.0
 
         def on_step(step: RuntimeStepTrace) -> None:
             queue.put_nowait({"event": "step", "data": step.model_dump(mode="json")})
@@ -210,7 +211,11 @@ async def chat_stream(http_request: Request) -> StreamingResponse:
         task = asyncio.create_task(worker())
         try:
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=heartbeat_seconds)
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+                    continue
                 event = str(item["event"])
                 data = item["data"]
                 yield f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"

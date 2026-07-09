@@ -12,8 +12,7 @@
     "pg-case-search",
     "pg-report-query",
     "chart-spec-builder",
-    "web-search",
-    "web-fetch",
+    "qwen-web-analysis",
     "calculator"
   ],
   "capability_hints": [
@@ -23,6 +22,7 @@
     "PostgreSQL 数据初始化",
     "涉法涉诉案件分析",
     "图表化报告输出",
-    "数据库优先的案例检索"
+    "数据库优先的案例检索",
+    "联网解释型分析"
   ]
 }

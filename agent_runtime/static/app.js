@@ -31,6 +31,36 @@ const CHART_LABEL_MAP = {
   total: "总量",
   count: "数量",
 };
+const CHART_TITLE_SEMANTICS = [
+  {
+    key: "source",
+    phrases: ["来源构成", "来源分布", "案件来源", "来源", "构成", "占比", "司法案件", "行政处罚"],
+  },
+  {
+    key: "trend",
+    phrases: ["月度趋势", "年度趋势", "按月统计", "按受理月份统计", "按月", "月度", "月份", "趋势"],
+  },
+  {
+    key: "industry",
+    phrases: ["行业分布", "行业领域", "行业"],
+  },
+  {
+    key: "region",
+    phrases: ["区内属地", "属地分布", "属地", "街道", "镇", "区域分布", "区域", "板块"],
+  },
+  {
+    key: "size",
+    phrases: ["企业规模", "规模分布", "规模"],
+  },
+  {
+    key: "ownership",
+    phrases: ["所有权性质", "所有制性质", "所有制", "所有权", "产权性质"],
+  },
+  {
+    key: "case_type",
+    phrases: ["案件事项类型", "事项类型", "案件类型", "案件类别", "案由分布", "案由"],
+  },
+];
 
 function normalizeChartRenderer(value) {
   const normalized = String(value || "").trim().toLowerCase();
@@ -524,10 +554,59 @@ function extractToolResults(toolCalls) {
 
 function normalizeChartTitle(value) {
   return String(value || "")
+    .replace(/\[\[chart:(.+?)\]\]/gi, "$1")
+    .replace(/^图\s*\d+\s*(?:[：:]\s*|\s+)/i, "")
     .replace(/\s*(?:（|\()?\s*(?:饼图|折线图|柱状图|堆叠柱状图|前\d+位|top\s*\d+)\s*(?:）|\))?\s*$/gi, "")
     .toLowerCase()
     .replace(/[\s\u3000]+/g, "")
     .replace(/[：:，,。．.、()[\]{}（）【】"'`“”‘’\-_/]/g, "");
+}
+
+function collectChartTitleSignals(value) {
+  const normalized = normalizeChartTitle(value);
+  const semantics = new Set();
+  const phrases = new Set();
+  for (const rule of CHART_TITLE_SEMANTICS) {
+    for (const phrase of rule.phrases) {
+      const phraseKey = normalizeChartTitle(phrase);
+      if (!phraseKey || !normalized.includes(phraseKey)) {
+        continue;
+      }
+      semantics.add(rule.key);
+      phrases.add(phraseKey);
+    }
+  }
+  return { normalized, semantics, phrases };
+}
+
+function scoreChartTitleMatch(markerSignals, chartTitle) {
+  const chartSignals = collectChartTitleSignals(chartTitle);
+  if (!markerSignals.normalized || !chartSignals.normalized) {
+    return 0;
+  }
+
+  let score = 0;
+  if (chartSignals.normalized === markerSignals.normalized) {
+    score += 120;
+  } else if (
+    chartSignals.normalized.includes(markerSignals.normalized) ||
+    markerSignals.normalized.includes(chartSignals.normalized)
+  ) {
+    score += 90;
+  }
+
+  const sharedSemantics = Array.from(markerSignals.semantics).filter((key) => chartSignals.semantics.has(key));
+  const sharedPhrases = Array.from(markerSignals.phrases).filter((phrase) => chartSignals.phrases.has(phrase));
+  score += sharedSemantics.length * 28;
+  score += sharedPhrases.length * 12;
+
+  if (markerSignals.semantics.size && !sharedSemantics.length && score < 90) {
+    return 0;
+  }
+  if (markerSignals.phrases.size && !sharedPhrases.length && !sharedSemantics.length && score < 90) {
+    return 0;
+  }
+  return score;
 }
 
 function localizeChartLabel(value, fallback = "") {
@@ -574,32 +653,31 @@ function resolveInlineChartIndex(marker, charts, usedIndexes) {
   if (!marker || !Array.isArray(charts) || !charts.length) {
     return null;
   }
-  const titleKey = normalizeChartTitle(marker.title || "");
-  if (titleKey) {
-    const matchedByTitle = charts.findIndex((chart, index) => {
-      if (usedIndexes.has(index)) {
-        return false;
-      }
-      const chartKey = normalizeChartTitle(chart.title || "");
-      return chartKey && (chartKey.includes(titleKey) || titleKey.includes(chartKey));
-    });
-    if (matchedByTitle >= 0) {
-      return matchedByTitle;
+  const markerSignals = collectChartTitleSignals(marker.title || "");
+  if (markerSignals.normalized) {
+    const rankedMatches = charts
+      .map((chart, index) => ({
+        index,
+        score: usedIndexes.has(index) ? 0 : scoreChartTitleMatch(markerSignals, chart.title || ""),
+      }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.index - right.index);
+    if (rankedMatches.length && rankedMatches[0].score >= 24) {
+      return rankedMatches[0].index;
     }
   }
-  if (Number.isInteger(marker.chartIndex) && marker.chartIndex >= 0 && marker.chartIndex < charts.length && !usedIndexes.has(marker.chartIndex)) {
-    return marker.chartIndex;
-  }
-  if (titleKey) {
-    const fuzzyMatch = charts.findIndex((chart, index) => {
-      if (usedIndexes.has(index)) {
-        return false;
-      }
-      const chartKey = normalizeChartTitle(chart.title || "");
-      return chartKey && (chartKey.startsWith(titleKey) || titleKey.startsWith(chartKey));
-    });
-    if (fuzzyMatch >= 0) {
-      return fuzzyMatch;
+  if (
+    Number.isInteger(marker.chartIndex) &&
+    marker.chartIndex >= 0 &&
+    marker.chartIndex < charts.length &&
+    !usedIndexes.has(marker.chartIndex)
+  ) {
+    if (!markerSignals.normalized) {
+      return marker.chartIndex;
+    }
+    const ordinalScore = scoreChartTitleMatch(markerSignals, charts[marker.chartIndex]?.title || "");
+    if (!markerSignals.semantics.size || ordinalScore >= 24) {
+      return marker.chartIndex;
     }
   }
   return null;
@@ -623,6 +701,13 @@ function removeEmptyAnchor(node) {
 
 function isValidChartIndex(index, charts) {
   return Number.isInteger(index) && index >= 0 && index < charts.length;
+}
+
+function hasAdjacentInlineChart(anchor) {
+  return Boolean(
+    anchor?.previousElementSibling?.classList?.contains("markdown-inline-chart") ||
+      anchor?.nextElementSibling?.classList?.contains("markdown-inline-chart"),
+  );
 }
 
 function insertInlineChart(anchor, chartIndex) {
@@ -700,7 +785,14 @@ function injectInlineCharts(root, toolCalls) {
   }
 
   for (const { anchor, marker } of entries.filter((entry) => entry.marker.type === "explicit")) {
-    if (anchor.nextElementSibling?.classList?.contains("markdown-inline-chart")) {
+    if (hasAdjacentInlineChart(anchor)) {
+      const nearbyChartIndex = resolveInlineChartIndex(marker, charts, insertedIndexes);
+      if (nearbyChartIndex != null) {
+        hiddenIndexes.add(nearbyChartIndex);
+      }
+      if (isValidChartIndex(marker.chartIndex, charts)) {
+        hiddenIndexes.add(marker.chartIndex);
+      }
       cleanupExplicitChartMarker(anchor, marker);
       removeEmptyAnchor(anchor);
       continue;
