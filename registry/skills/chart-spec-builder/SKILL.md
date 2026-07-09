@@ -54,3 +54,12 @@ metadata:
 使用这个 executable skill 生成图表规格，而不是直接生成渲染后的图片。
 
 优先输出兼容 ECharts 的 JSON，因为前端后续可以直接渲染。
+
+## 调用约束
+
+- 尽量显式传入 `x_field` 和 `y_fields`，不要只给 `rows` 就假设前端会自动理解。
+- `pie` 图同样应该传入数值字段；如果查询结果是 `category + cnt`，应显式写成：
+  - `x_field: "category"`
+  - `y_fields: ["cnt"]`
+- 只有在字段非常规则、且 `rows` 中能够明显推断“一个类别字段 + 一个或多个数值字段”时，才依赖自动推断。
+- 如果来源是 SQL 查询结果，优先让列别名本身就是业务可读字段，如 `month`、`region`、`industry`、`case_count`，避免使用语义不明的临时列名。

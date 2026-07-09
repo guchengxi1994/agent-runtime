@@ -609,7 +609,27 @@ function cleanupExplicitChartMarker(node, marker) {
   if (!node || !marker || !marker.raw) {
     return;
   }
-  node.innerHTML = node.innerHTML.replace(marker.raw, "").trim();
+  node.innerHTML = node.innerHTML.split(marker.raw).join("").trim();
+}
+
+function removeEmptyAnchor(node) {
+  if (!node) {
+    return;
+  }
+  if (!node.textContent.trim() && !node.children.length) {
+    node.remove();
+  }
+}
+
+function isValidChartIndex(index, charts) {
+  return Number.isInteger(index) && index >= 0 && index < charts.length;
+}
+
+function insertInlineChart(anchor, chartIndex) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "markdown-inline-chart";
+  wrapper.innerHTML = `<div class="chart-canvas" data-chart-index="${chartIndex}"></div>`;
+  anchor.insertAdjacentElement("afterend", wrapper);
 }
 
 function isChartSpecCodeBlock(node) {
@@ -652,37 +672,65 @@ function injectInlineCharts(root, toolCalls) {
   if (!charts.length) {
     return new Set();
   }
-  const usedIndexes = new Set();
+  const insertedIndexes = new Set();
+  const hiddenIndexes = new Set();
+  const usedFigureOrdinals = new Set();
   const anchors = Array.from(root.querySelectorAll("h1, h2, h3, h4, h5, h6, p, li"));
-  for (const anchor of anchors) {
+  const entries = anchors
+    .map((anchor) => ({ anchor, marker: parseInlineChartMarker(anchor.textContent || "") }))
+    .filter((entry) => entry.marker);
+
+  for (const { anchor, marker } of entries.filter((entry) => entry.marker.type === "figure")) {
     if (anchor.nextElementSibling?.classList?.contains("markdown-inline-chart")) {
       continue;
     }
-    const marker = parseInlineChartMarker(anchor.textContent || "");
-    if (!marker) {
-      continue;
-    }
-    const chartIndex = resolveInlineChartIndex(marker, charts, usedIndexes);
+    const chartIndex = resolveInlineChartIndex(marker, charts, insertedIndexes);
     if (chartIndex == null) {
       continue;
     }
-    const removeEmptyAnchor = marker.type === "explicit";
-    if (marker.type === "explicit") {
-      cleanupExplicitChartMarker(anchor, marker);
+    insertInlineChart(anchor, chartIndex);
+    insertedIndexes.add(chartIndex);
+    hiddenIndexes.add(chartIndex);
+    if (isValidChartIndex(marker.chartIndex, charts)) {
+      usedFigureOrdinals.add(marker.chartIndex);
+      if (marker.chartIndex !== chartIndex) {
+        hiddenIndexes.add(marker.chartIndex);
+      }
     }
-    const wrapper = document.createElement("div");
-    wrapper.className = "markdown-inline-chart";
-    wrapper.innerHTML = `<div class="chart-canvas" data-chart-index="${chartIndex}"></div>`;
-    anchor.insertAdjacentElement("afterend", wrapper);
-    if (removeEmptyAnchor && !anchor.textContent.trim()) {
-      anchor.remove();
-    }
-    usedIndexes.add(chartIndex);
   }
-  if (usedIndexes.size) {
+
+  for (const { anchor, marker } of entries.filter((entry) => entry.marker.type === "explicit")) {
+    if (anchor.nextElementSibling?.classList?.contains("markdown-inline-chart")) {
+      cleanupExplicitChartMarker(anchor, marker);
+      removeEmptyAnchor(anchor);
+      continue;
+    }
+    if (isValidChartIndex(marker.chartIndex, charts) && usedFigureOrdinals.has(marker.chartIndex)) {
+      hiddenIndexes.add(marker.chartIndex);
+      cleanupExplicitChartMarker(anchor, marker);
+      removeEmptyAnchor(anchor);
+      continue;
+    }
+    const chartIndex = resolveInlineChartIndex(marker, charts, insertedIndexes);
+    if (chartIndex == null) {
+      cleanupExplicitChartMarker(anchor, marker);
+      removeEmptyAnchor(anchor);
+      continue;
+    }
+    cleanupExplicitChartMarker(anchor, marker);
+    insertInlineChart(anchor, chartIndex);
+    insertedIndexes.add(chartIndex);
+    hiddenIndexes.add(chartIndex);
+    if (isValidChartIndex(marker.chartIndex, charts) && marker.chartIndex !== chartIndex) {
+      hiddenIndexes.add(marker.chartIndex);
+    }
+    removeEmptyAnchor(anchor);
+  }
+
+  if (hiddenIndexes.size) {
     cleanupInlineChartSpecs(root);
   }
-  return usedIndexes;
+  return hiddenIndexes;
 }
 
 function isReportLikeResponse(text) {

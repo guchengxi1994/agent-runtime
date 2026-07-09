@@ -325,3 +325,44 @@ def test_chart_spec_builder_returns_echarts_option():
     assert result["renderer"] == "echarts"
     assert result["option"]["xAxis"]["data"] == ["2026-01", "2026-02", "2026-03"]
     assert result["option"]["series"][0]["name"] == "案件数"
+
+
+def test_chart_spec_builder_infers_fields_for_pie_rows():
+    module = load_skill_module(Path("registry/skills/chart-spec-builder/skill.py"))
+
+    result = module.execute(
+        {
+            "chart_type": "pie",
+            "title": "企业规模分布",
+            "rows": [
+                {"company_size": "微型", "cnt": 3984},
+                {"company_size": "小型", "cnt": 3195},
+                {"company_size": "中型", "cnt": 1645},
+            ],
+        }
+    )
+
+    assert result["success"] is True
+    assert result["resolved_fields"]["x_field"] == "company_size"
+    assert result["resolved_fields"]["y_fields"] == ["cnt"]
+    assert result["option"]["series"][0]["data"][0]["value"] == 3984
+
+
+def test_chart_spec_builder_reports_missing_numeric_field_for_pie():
+    module = load_skill_module(Path("registry/skills/chart-spec-builder/skill.py"))
+
+    try:
+        module.execute(
+            {
+                "chart_type": "pie",
+                "title": "无效饼图",
+                "rows": [
+                    {"industry": "批发业", "label": "高"},
+                    {"industry": "房地产业", "label": "中"},
+                ],
+            }
+        )
+    except ValueError as exc:
+        assert "y_fields is required for pie charts" in str(exc)
+    else:
+        raise AssertionError("expected pie chart field inference to fail when no numeric column exists")

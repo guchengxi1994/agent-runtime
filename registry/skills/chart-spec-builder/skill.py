@@ -21,10 +21,16 @@ def execute(params):
     if chart_type not in {"line", "bar", "stacked_bar", "pie", "heatmap"}:
         raise ValueError("unsupported chart_type")
 
+    inferred = _infer_chart_fields(rows, chart_type=chart_type, x_field=x_field, y_fields=y_fields)
+    x_field = inferred["x_field"]
+    y_fields = inferred["y_fields"]
+
     if chart_type in {"line", "bar", "stacked_bar", "heatmap"} and not x_field:
         raise ValueError("x_field is required for this chart_type")
     if chart_type != "pie" and not y_fields:
         raise ValueError("y_fields is required for this chart_type")
+    if chart_type == "pie" and not y_fields:
+        raise ValueError("y_fields is required for pie charts unless it can be inferred from the rows")
 
     option = _build_option(chart_type, title, subtitle, x_field, y_fields, rows, params.get("series_name_map"))
     return {
@@ -34,6 +40,8 @@ def execute(params):
         "title": title,
         "option": option,
         "data_preview": rows[:10],
+        "resolved_fields": {"x_field": x_field, "y_fields": y_fields},
+        "inferred_fields": inferred["inferred_fields"],
         "frontend_hint": "Render option directly with ECharts on the frontend.",
     }
 
@@ -111,6 +119,76 @@ def _build_option(chart_type, title, subtitle, x_field, y_fields, rows, series_n
 
 def field_name(series_name_map, field):
     return str(series_name_map.get(field) or field)
+
+
+def _infer_chart_fields(rows, *, chart_type, x_field, y_fields):
+    inferred_fields = {}
+    resolved_x_field = x_field
+    resolved_y_fields = list(y_fields)
+
+    if not resolved_x_field:
+        inferred_x = _infer_x_field(rows)
+        if inferred_x:
+            resolved_x_field = inferred_x
+            inferred_fields["x_field"] = inferred_x
+
+    if not resolved_y_fields:
+        inferred_y = _infer_y_fields(rows, exclude_field=resolved_x_field, chart_type=chart_type)
+        if inferred_y:
+            resolved_y_fields = inferred_y
+            inferred_fields["y_fields"] = inferred_y
+
+    return {
+        "x_field": resolved_x_field,
+        "y_fields": resolved_y_fields,
+        "inferred_fields": inferred_fields,
+    }
+
+
+def _infer_x_field(rows):
+    keys = _ordered_row_keys(rows)
+    for key in keys:
+        values = [row.get(key) for row in rows if isinstance(row, dict) and row.get(key) not in (None, "")]
+        if values and any(not _is_numeric_like(value) for value in values):
+            return key
+    return keys[0] if keys else ""
+
+
+def _infer_y_fields(rows, *, exclude_field, chart_type):
+    keys = [key for key in _ordered_row_keys(rows) if key != exclude_field]
+    numeric_keys = []
+    for key in keys:
+        values = [row.get(key) for row in rows if isinstance(row, dict) and row.get(key) not in (None, "")]
+        if values and all(_is_numeric_like(value) for value in values):
+            numeric_keys.append(key)
+    if not numeric_keys:
+        return []
+    if chart_type in {"pie", "heatmap"}:
+        return numeric_keys[:1]
+    return numeric_keys[: min(3, len(numeric_keys))]
+
+
+def _ordered_row_keys(rows):
+    keys = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in row.keys():
+            if key not in keys:
+                keys.append(key)
+    return keys
+
+
+def _is_numeric_like(value):
+    if isinstance(value, bool) or value in (None, ""):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    try:
+        float(str(value).replace(",", ""))
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 def _string_list(value):
