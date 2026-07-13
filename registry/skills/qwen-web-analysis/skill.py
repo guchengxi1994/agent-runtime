@@ -3,8 +3,10 @@ definition = {
     "description": "Use a DashScope-compatible model with native web search enabled to produce deeper Chinese analysis.",
 }
 
+import json
 import os
 import re
+import sys
 import time
 from urllib.parse import urlparse
 
@@ -229,13 +231,67 @@ def call_dashscope_native_search(model_config, *, messages, temperature, max_tok
             "temperature": temperature,
             "max_tokens": max_tokens,
             "enable_search": True,
+            "search_options": {"forced_search": True},
+            "stream": True,
         },
-        timeout=model_config["timeout_seconds"],
+        timeout=(10, model_config["timeout_seconds"]),
+        stream=True,
     )
     response.raise_for_status()
-    payload = response.json()
+    payload = collect_stream_payload(response)
     if not payload.get("choices"):
         raise RuntimeError("model response did not contain choices")
+    return payload
+
+
+def collect_stream_payload(response):
+    content_parts = []
+    finish_reason = ""
+    usage = None
+    message_metadata = {key: [] for key in ("annotations", "citations", "search_results", "references")}
+    response.encoding = "utf-8"
+    for raw_line in response.iter_lines(decode_unicode=True):
+        line = str(raw_line or "").strip()
+        if not line or line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            line = line[5:].strip()
+        if line == "[DONE]":
+            break
+        try:
+            chunk = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        sys.stderr.write(".")
+        sys.stderr.flush()
+        if isinstance(chunk.get("usage"), dict):
+            usage = chunk["usage"]
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        content = delta.get("content")
+        if isinstance(content, str):
+            content_parts.append(content)
+        elif isinstance(content, list):
+            content_parts.extend(
+                str(item.get("text") or item.get("content") or "")
+                for item in content
+                if isinstance(item, dict) and (item.get("text") or item.get("content"))
+            )
+        if choice.get("finish_reason"):
+            finish_reason = str(choice["finish_reason"])
+        for key in message_metadata:
+            for source in (delta, choice, chunk):
+                values = source.get(key) if isinstance(source, dict) else None
+                if isinstance(values, list):
+                    message_metadata[key].extend(values)
+    message = {"content": "".join(content_parts).strip()}
+    message.update({key: values for key, values in message_metadata.items() if values})
+    payload = {"choices": [{"message": message, "finish_reason": finish_reason}]}
+    if usage:
+        payload["usage"] = usage
     return payload
 
 

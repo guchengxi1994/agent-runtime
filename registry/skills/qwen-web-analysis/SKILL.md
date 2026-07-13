@@ -56,14 +56,14 @@ metadata:
         - question
       additionalProperties: false
     execution_policy:
-      timeout_ms: 120000
-      idle_timeout_ms: 60000
+      timeout_ms: 150000
+      idle_timeout_ms: 90000
       packages:
         - requests==2.32.3
     required_secrets:
-      OPENAI_API_KEY: OpenAI-compatible API key for the analysis model.
-      AGENT_RUNTIME_MODEL: OpenAI-compatible model name such as qwen-plus or qwen-max.
-      OPENAI_BASE_URL: OpenAI-compatible base URL such as a DashScope-compatible endpoint.
+      OPENAI_API_KEY: env:OPENAI_API_KEY
+      AGENT_RUNTIME_MODEL: env:AGENT_RUNTIME_MODEL
+      OPENAI_BASE_URL: env:OPENAI_BASE_URL
 ---
 
 # Qwen Web Analysis
@@ -71,6 +71,8 @@ metadata:
 把这个 skill 视为“联网分析增强器”，不是普通搜索工具。
 
 它依赖 DashScope 兼容 OpenAI 的模型接口，并直接启用模型原生联网搜索能力，不再额外走 Quark 或其他外部检索链。
+
+执行时使用 OpenAI 兼容的 `chat/completions` 流式响应，设置 `enable_search=true`、`search_options.forced_search=true` 和 `stream=true`。skill 会逐块合并正文并向 sandbox 发送轻量进度心跳，避免联网搜索阶段因长时间没有进程输出而被误判为 idle timeout。
 
 ## 适用场景
 
