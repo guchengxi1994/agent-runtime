@@ -186,6 +186,12 @@ metadata:
 | `AGENT_RUNTIME_HOST` | `0.0.0.0` | 服务监听地址 |
 | `AGENT_RUNTIME_PORT` | `8010` | 服务端口 |
 | `AGENT_RUNTIME_MODEL` | `gpt-4.1-mini` | OpenAI 模型 |
+| `AGENT_RUNTIME_MEMORY_MODEL` | 空（回退到主模型） | 可选的低成本 memory 增量提取模型；复用主模型的 API key 和 base URL |
+| `AGENT_RUNTIME_MODEL_CONTEXT_TOKENS` | `131072` | 当前模型的上下文窗口长度；按实际 provider/model 配置 |
+| `AGENT_RUNTIME_CONTEXT_COMPACTION_THRESHOLD` | `0.8` | 下一次请求预计占用达到上下文窗口比例时，先压缩旧历史再调用模型 |
+| `AGENT_RUNTIME_MEMORY_ENABLED` | `true` | 是否启用 workspace 增量记忆 |
+| `AGENT_RUNTIME_MEMORY_CONTEXT_TOKENS` | `4000` | 新 conversation 注入 durable memory 的最大估算 token |
+| `AGENT_RUNTIME_MEMORY_MAX_ENTRIES` | `200` | 单 workspace 最多保留的 memory 条目数 |
 | `AGENT_RUNTIME_REASONING_EFFORT` | 空 | 可选，仅在 provider/model 支持时传给 Chat Completions |
 | `AGENT_RUNTIME_EXPOSE_REASONING_CONTENT` | `false` | 是否在 `steps.kind=thinking` 中展示兼容接口返回的 reasoning 文本 |
 | `AGENT_RUNTIME_SANDBOX_URL` | `http://127.0.0.1:8001` | sandbox 地址 |
@@ -197,6 +203,10 @@ metadata:
 | `AGENT_RUNTIME_HTTP_LOG_LEVEL` | `WARNING` | `httpx/httpcore` 请求日志等级 |
 
 启动时 runtime 会输出一条 OpenAI client 配置日志，包含 `model`、`base_url`、`base_url_source`、`api_key_present`、`api_key_source`、脱敏后的 `api_key_masked`、key 长度、`api_key_sha256` 短指纹和 `env_file`。不会输出完整 API key。
+
+上下文压缩由 runtime 控制，不依赖模型自行判断。每轮模型返回的 `prompt_tokens/completion_tokens` 会累计到 conversation 状态；上一轮真实 `prompt_tokens` 用来校准下一轮本地估算。压缩触发判断使用“下一次预计 prompt tokens / 模型上下文长度”，而不是累计计费 token。达到阈值后，runtime 调用同一模型把当前轮之前的旧消息压成可恢复摘要，保留当前用户输入和本轮 tool-call 链。
+
+每个 workspace 的长期记忆保存在 `artifacts/workspaces/<workspace_id>/MEMORY.md`，其目标是让新模型对话恢复用户任务，而不是保存报告正文。runtime 会在回复前确定性写入原始目标和当前用户问题；`AGENT_RUNTIME_MEMORY_MODEL`（未配置则使用主模型）在回复后异步补充约束、决策、进度、待办和 artifact 指针。后台 job 先持久化到 `memory_jobs/*.json`，按 workspace 串行执行并自动重试 3 次；失败状态可通过 `GET /workspaces/{workspace_id}/memory` 查看，并通过 `POST /workspaces/{workspace_id}/memory/retry` 或前端按钮重试。新 conversation 只注入带明确 `use_when` 的 resume context，旧的无用途条目保留审计但不注入模型。
 
 ## 优化细则
 

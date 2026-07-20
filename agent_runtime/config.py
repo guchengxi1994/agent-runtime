@@ -94,6 +94,7 @@ class AgentRuntimeSettings:
     host: str
     port: int
     model: str
+    memory_model: str | None
     openai_api_key: str | None
     openai_base_url: str | None
     reasoning_effort: str | None
@@ -103,6 +104,11 @@ class AgentRuntimeSettings:
     sandbox_url: str
     admin_token: str | None
     max_runtime_rounds: int
+    model_context_tokens: int
+    context_compaction_threshold: float
+    memory_enabled: bool
+    memory_context_tokens: int
+    memory_max_entries: int
     request_timeout_seconds: float
     env_file_loaded: str | None = None
     openai_api_key_source: str = "unset"
@@ -126,6 +132,7 @@ def load_settings() -> AgentRuntimeSettings:
         host=env("AGENT_RUNTIME_HOST", "0.0.0.0"),
         port=int(env("AGENT_RUNTIME_PORT", "8010")),
         model=env("AGENT_RUNTIME_MODEL", "gpt-4.1-mini"),
+        memory_model=optional_env("AGENT_RUNTIME_MEMORY_MODEL"),
         openai_api_key=optional_env("OPENAI_API_KEY"),
         openai_base_url=optional_env("OPENAI_BASE_URL"),
         reasoning_effort=optional_env("AGENT_RUNTIME_REASONING_EFFORT"),
@@ -135,10 +142,23 @@ def load_settings() -> AgentRuntimeSettings:
         sandbox_url=env("AGENT_RUNTIME_SANDBOX_URL", "http://127.0.0.1:8001"),
         admin_token=os.getenv("AGENT_RUNTIME_ADMIN_TOKEN") or None,
         max_runtime_rounds=int(env("AGENT_RUNTIME_MAX_RUNTIME_ROUNDS", "6")),
+        model_context_tokens=int(env("AGENT_RUNTIME_MODEL_CONTEXT_TOKENS", "131072")),
+        context_compaction_threshold=float(env("AGENT_RUNTIME_CONTEXT_COMPACTION_THRESHOLD", "0.8")),
+        memory_enabled=bool_env("AGENT_RUNTIME_MEMORY_ENABLED", True),
+        memory_context_tokens=int(env("AGENT_RUNTIME_MEMORY_CONTEXT_TOKENS", "4000")),
+        memory_max_entries=int(env("AGENT_RUNTIME_MEMORY_MAX_ENTRIES", "200")),
         request_timeout_seconds=float(env("AGENT_RUNTIME_REQUEST_TIMEOUT_SECONDS", "600")),
         env_file_loaded=str(dotenv.path) if dotenv.path else None,
         openai_api_key_source=env_source("OPENAI_API_KEY", dotenv),
         openai_base_url_source=env_source("OPENAI_BASE_URL", dotenv),
     )
+    if settings.model_context_tokens <= 0:
+        raise ValueError("AGENT_RUNTIME_MODEL_CONTEXT_TOKENS must be positive")
+    if not 0 < settings.context_compaction_threshold < 1:
+        raise ValueError("AGENT_RUNTIME_CONTEXT_COMPACTION_THRESHOLD must be between 0 and 1")
+    if settings.memory_context_tokens <= 0:
+        raise ValueError("AGENT_RUNTIME_MEMORY_CONTEXT_TOKENS must be positive")
+    if settings.memory_max_entries <= 0:
+        raise ValueError("AGENT_RUNTIME_MEMORY_MAX_ENTRIES must be positive")
     settings.ensure_directories()
     return settings

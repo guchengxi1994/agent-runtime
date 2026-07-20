@@ -1609,6 +1609,7 @@ async function sendMessage(event) {
           null,
           payload.tool_calls || [],
         );
+        refreshMemory();
       },
       error(payload) {
         throw new Error(payload.error || "stream error");
@@ -1671,6 +1672,49 @@ function syncSessionMeta() {
   $("sessionMeta").textContent = `conversation: ${conversationText} · workspace: ${workspaceText}`;
 }
 
+async function refreshMemory(event = null) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const workspaceId = ($("workspaceInput").value || "").trim() || state.workspaceId;
+  if (!workspaceId) {
+    $("memoryMeta").textContent = "需要先指定或创建 workspace。";
+    $("memoryContent").textContent = "No resume memory available for the model yet.";
+    return;
+  }
+  $("memoryMeta").textContent = "读取中...";
+  try {
+    const memory = await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}/memory`);
+    const pending = (memory.job_counts?.pending || 0) + (memory.job_counts?.running || 0) + (memory.job_counts?.retrying || 0);
+    const failed = memory.job_counts?.failed || 0;
+    $("memoryMeta").textContent = `revision ${memory.revision} · ${memory.entries.length} entries · background ${pending} pending / ${failed} failed`;
+    $("memoryContent").textContent = memory.model_context || "No resume memory available for the model yet.";
+  } catch (error) {
+    $("memoryMeta").textContent = `读取失败：${error.message}`;
+  }
+}
+
+async function retryMemory(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const workspaceId = ($("workspaceInput").value || "").trim() || state.workspaceId;
+  if (!workspaceId) {
+    $("memoryMeta").textContent = "需要先指定或创建 workspace。";
+    return;
+  }
+  $("memoryMeta").textContent = "正在重新排队失败任务...";
+  try {
+    const result = await fetchJson(`/workspaces/${encodeURIComponent(workspaceId)}/memory/retry`, {
+      method: "POST",
+    });
+    $("memoryMeta").textContent = `已重新排队 ${result.retried} 个失败任务。`;
+    window.setTimeout(() => refreshMemory(), 500);
+  } catch (error) {
+    $("memoryMeta").textContent = `重试失败：${error.message}`;
+  }
+}
+
 function resetConversation() {
   state.conversationId = null;
   syncSessionMeta();
@@ -1722,6 +1766,8 @@ function init() {
   });
   $("fileInput").addEventListener("change", syncSelectedFiles);
   $("workspaceInput").addEventListener("input", syncSessionMeta);
+  $("refreshMemory").addEventListener("click", refreshMemory);
+  $("retryMemory").addEventListener("click", retryMemory);
   $("messageInput").addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       $("chatForm").requestSubmit();

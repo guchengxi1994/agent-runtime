@@ -235,6 +235,11 @@
         #fileInput { @apply block w-full max-w-full text-sm text-zinc-600; }
         #fileInput::file-selector-button { @apply mr-3 rounded-xl border-0 bg-zinc-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-zinc-800; }
         .workspace-input { @apply block w-full rounded-2xl border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10; }
+        .memory-panel { @apply mt-3 rounded-2xl border border-zinc-200 bg-zinc-50/80; }
+        .memory-panel summary { @apply flex cursor-pointer items-center justify-between gap-3 px-4 py-3 text-sm font-semibold text-zinc-800; }
+        .memory-panel-body { @apply border-t border-zinc-200 px-4 py-3; }
+        .memory-panel pre { @apply max-h-72 overflow-auto whitespace-pre-wrap rounded-xl bg-white p-3 text-xs leading-6 text-zinc-700; }
+        .memory-meta { @apply mb-2 text-xs text-zinc-500; }
         .chart-renderer-select {
           @apply rounded-2xl border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-800 outline-none transition focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10;
         }
@@ -397,6 +402,19 @@
             </label>
             <input class="workspace-input" id="workspaceInput" type="text" placeholder="例如：plant_a_line_3" />
           </div>
+          <details class="memory-panel" id="memoryPanel">
+            <summary>
+              <span>Model Resume Memory</span>
+              <span>
+                <button class="ghost" id="retryMemory" type="button">重试失败任务</button>
+                <button class="ghost" id="refreshMemory" type="button">刷新</button>
+              </span>
+            </summary>
+            <div class="memory-panel-body">
+              <div class="memory-meta" id="memoryMeta">需要先指定或创建 workspace。</div>
+              <pre id="memoryContent">No resume memory available for the model yet.</pre>
+            </div>
+          </details>
           <div class="selected-files" id="selectedFiles"></div>
           <textarea
             id="messageInput"
@@ -412,6 +430,6 @@
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-    <script src="/static/app.js?v=20260708-inline-chart-localized"></script>
+    <script src="/static/app.js?v=20260720-async-resume-memory"></script>
   </body>
 </html>

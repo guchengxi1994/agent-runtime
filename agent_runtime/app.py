@@ -75,6 +75,15 @@ async def health() -> dict[str, object]:
         "status": "ok",
         "mode": "server_chat_runtime",
         "model": settings.model,
+        "memory_model": settings.memory_model or settings.model,
+        "model_context_tokens": settings.model_context_tokens,
+        "context_compaction_threshold": settings.context_compaction_threshold,
+        "context_compaction_threshold_tokens": int(
+            settings.model_context_tokens * settings.context_compaction_threshold
+        ),
+        "memory_enabled": settings.memory_enabled,
+        "memory_context_tokens": settings.memory_context_tokens,
+        "memory_max_entries": settings.memory_max_entries,
         "openai_api_key_configured": bool(settings.openai_api_key),
         "openai_api_key_source": settings.openai_api_key_source,
         "openai_base_url": settings.openai_base_url,
@@ -134,6 +143,38 @@ async def list_skills() -> dict[str, object]:
 @app.get("/executions")
 async def list_executions() -> dict[str, object]:
     return {"executions": runtime.executions[-100:]}
+
+
+@app.get("/workspaces/{workspace_id}/memory")
+async def get_workspace_memory(workspace_id: str) -> dict[str, object]:
+    document = runtime.memory.ensure(workspace_id)
+    jobs = runtime.memory.list_jobs(workspace_id, limit=20)
+    job_counts: dict[str, int] = {}
+    for job in jobs:
+        status = str(job.get("status") or "unknown")
+        job_counts[status] = job_counts.get(status, 0) + 1
+    return {
+        "workspace_id": document.workspace_id,
+        "revision": document.revision,
+        "updated_at": document.updated_at,
+        "entries": [entry.to_dict() for entry in document.entries.values()],
+        "model_context": runtime.memory.build_context(
+            document,
+            max_tokens=settings.memory_context_tokens,
+        ),
+        "markdown": runtime.memory.render(document),
+        "jobs": [
+            {key: value for key, value in job.items() if key != "payload"}
+            for job in jobs
+        ],
+        "job_counts": job_counts,
+    }
+
+
+@app.post("/workspaces/{workspace_id}/memory/retry")
+async def retry_workspace_memory(workspace_id: str) -> dict[str, object]:
+    retried = runtime.retry_memory_jobs(workspace_id)
+    return {"workspace_id": workspace_id, "retried": retried}
 
 
 async def build_chat_request(http_request: Request) -> ChatRequest:
