@@ -674,7 +674,8 @@ def test_new_conversation_loads_workspace_memory_and_queues_background_delta(tmp
     assert "输出使用中文" in (conversation.memory_context or "")
     document = runtime.memory.load("ws_memory")
     assert document.entries["workspace.primary_objective"].content == "分析对象是 1 号转炉"
-    assert document.entries["workspace.current_request"].content == "分析对象是 1 号转炉"
+    assert document.entries["workspace.current_focus"].content == "分析对象是 1 号转炉"
+    assert "workspace.current_request" not in document.entries
     assert document.entries["analysis.target"].content == "分析对象为 1 号转炉"
     assert any(step.label == "memory_update" and step.status == "queued" for step in response.steps)
     assert calls_before_wait == 1
@@ -739,6 +740,15 @@ def test_memory_delta_rejects_protected_questions_and_entries_without_usage():
                         "content": "等待用户确认分析口径",
                         "use_when": "恢复该分析任务时先检查用户是否已确认口径",
                     },
+                    {
+                        "key": "decisions.tool_failure",
+                        "section": "decisions",
+                        "content": "联网工具失败，因此以后都不联网",
+                        "use_when": "后续分析时使用",
+                        "source": "runtime",
+                        "confidence": "confirmed",
+                        "artifact_ids": ["art_0047_web"],
+                    },
                 ],
                 "removes": ["workspace.primary_objective"],
             },
@@ -746,8 +756,64 @@ def test_memory_delta_rejects_protected_questions_and_entries_without_usage():
         )
     )
 
-    assert [item["key"] for item in delta["upserts"]] == ["workflow.next_step"]
+    assert [item["key"] for item in delta["upserts"]] == ["findings.tool_stats", "workflow.next_step"]
+    assert delta["upserts"][0]["confidence"] == "verified"
     assert delta["removes"] == []
+
+
+def test_memory_artifact_evidence_includes_checkpoint_payload(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    checkpoint = runtime.artifacts.write_checkpoint(
+        workspace_id="ws_evidence",
+        conversation_id="conv_evidence",
+        run_id="run_evidence",
+        title="案件基础盘",
+        summary="案件数据基础情况已核验",
+        payload={"record_count": 11107, "enterprise_count": 2438},
+    )
+
+    evidence = runtime._memory_artifact_evidence("ws_evidence", "run_evidence")
+
+    assert evidence[0]["artifact_id"] == checkpoint.artifact_id
+    assert evidence[0]["checkpoint_content"]["payload"]["record_count"] == 11107
+
+
+def test_memory_context_excludes_legacy_non_user_decision_but_keeps_verified_baseline(tmp_path):
+    store = MemoryStore(tmp_path / "artifacts")
+    document = store.apply_delta(
+        "ws_semantics",
+        {
+            "upserts": [
+                {
+                    "key": "decisions.failed_tool",
+                    "section": "decisions",
+                    "content": "联网工具失败，因此以后都不联网",
+                    "use_when": "后续分析时使用",
+                    "source": "runtime",
+                    "confidence": "confirmed",
+                    "artifact_ids": ["art_failed"],
+                },
+                {
+                    "key": "case.baseline.coverage",
+                    "section": "confirmed_facts",
+                    "content": "共11107条记录，覆盖2438家企业",
+                    "use_when": "定义案件分析总体范围时使用",
+                    "source": "tool",
+                    "confidence": "verified",
+                    "artifact_ids": ["art_checkpoint"],
+                },
+            ],
+            "removes": [],
+        },
+    )
+
+    context = store.build_context(document)
+
+    assert "11107条记录" in context
+    assert "以后都不联网" not in context
 
 
 def test_chat_compacts_old_history_before_next_model_call(tmp_path):

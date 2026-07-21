@@ -208,6 +208,8 @@ metadata:
 
 每个 workspace 的长期记忆保存在 `artifacts/workspaces/<workspace_id>/MEMORY.md`，其目标是让新模型对话恢复用户任务，而不是保存报告正文。runtime 会在回复前确定性写入原始目标和当前用户问题；`AGENT_RUNTIME_MEMORY_MODEL`（未配置则使用主模型）在回复后异步补充约束、决策、进度、待办和 artifact 指针。后台 job 先持久化到 `memory_jobs/*.json`，按 workspace 串行执行并自动重试 3 次；失败状态可通过 `GET /workspaces/{workspace_id}/memory` 查看，并通过 `POST /workspaces/{workspace_id}/memory/retry` 或前端按钮重试。新 conversation 只注入带明确 `use_when` 的 resume context，旧的无用途条目保留审计但不注入模型。
 
+Memory section 的边界如下：`Workspace Goal` 只保存长期目标、范围和交付标准；最新问题单独进入 `Current Focus`。`Confirmed Facts` 保存用户明确确认或由 artifact 验证的可复用基础盘，后者使用 `confidence=verified` 并必须引用 artifact。`Decisions` 只接受用户明确批准的口径、假设或取舍，工具失败和 assistant 推断不会进入。`Current State` 只描述已完成进度和可恢复状态，避免重复案件基础事实。
+
 ## 优化细则
 
 - 候选集必须先由 runtime 基于 agent、user、permission 过滤，模型只能在安全候选集中规划。

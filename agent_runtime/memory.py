@@ -18,6 +18,7 @@ MEMORY_SECTIONS = (
     "confirmed_facts",
     "user_preferences",
     "decisions",
+    "current_focus",
     "current_state",
     "open_items",
     "important_artifacts",
@@ -27,9 +28,20 @@ SECTION_TITLES = {
     "confirmed_facts": "Confirmed Facts",
     "user_preferences": "User Preferences",
     "decisions": "Decisions",
+    "current_focus": "Current Focus",
     "current_state": "Current State",
     "open_items": "Open Items",
     "important_artifacts": "Important Artifacts",
+}
+SECTION_DESCRIPTIONS = {
+    "workspace_goal": "Stable workspace-level objective, scope, intended deliverable, and success criteria. Not the latest turn or its result.",
+    "confirmed_facts": "Durable baseline facts explicitly confirmed by the user or verified by referenced artifacts.",
+    "user_preferences": "Stable user preferences that should shape future work in this workspace.",
+    "decisions": "Choices, assumptions, or analysis conventions explicitly approved by the user.",
+    "current_focus": "The latest user question or active subtask within the broader workspace goal.",
+    "current_state": "What has been completed and the resumable workflow state. Do not duplicate baseline facts here.",
+    "open_items": "Unresolved questions, blockers, and concrete next actions.",
+    "important_artifacts": "Pointers to evidence or checkpoints, including why and when a future model should inspect them.",
 }
 ENTRY_RE = re.compile(r"^<!-- memory-entry: (\{.*\}) -->$", re.MULTILINE)
 META_RE = re.compile(r"^<!-- memory-meta: (\{.*\}) -->$", re.MULTILINE)
@@ -247,7 +259,7 @@ class MemoryStore:
         query_terms = lexical_terms(query)
         scored: list[tuple[int, str, MemoryEntry]] = []
         for entry in document.entries.values():
-            if not entry.use_when and entry.key not in {"workspace.primary_objective", "workspace.current_request"}:
+            if not memory_entry_is_resumable(entry):
                 continue
             haystack = f"{entry.key} {entry.section} {entry.content}".casefold()
             score = sum(1 for term in query_terms if term in haystack)
@@ -273,7 +285,7 @@ class MemoryStore:
             key=lambda item: (section_priority.get(item.section, 99), item.key),
         )
         for entry in entries:
-            if not entry.use_when and entry.key not in {"workspace.primary_objective", "workspace.current_request"}:
+            if not memory_entry_is_resumable(entry):
                 continue
             line = f"- [{entry.section}] {entry.key}: {entry.content}"
             if entry.use_when:
@@ -309,7 +321,7 @@ class MemoryStore:
         for entry in document.entries.values():
             grouped.setdefault(entry.section, []).append(entry)
         for section in MEMORY_SECTIONS:
-            lines.extend([f"## {SECTION_TITLES[section]}", ""])
+            lines.extend([f"## {SECTION_TITLES[section]}", "", f"> {SECTION_DESCRIPTIONS[section]}", ""])
             entries = sorted(grouped.get(section, []), key=lambda item: item.key)
             if not entries:
                 lines.extend(["- No entries.", ""])
@@ -363,9 +375,18 @@ class MemoryStore:
             return None
         source = str(payload.get("source") or "runtime").strip() or "runtime"
         confidence = str(payload.get("confidence") or "working").strip() or "working"
+        if source not in {"user", "assistant", "tool", "runtime"}:
+            source = "runtime"
+        if confidence not in {"confirmed", "verified", "working"}:
+            confidence = "working"
         artifact_ids = payload.get("artifact_ids")
         if not isinstance(artifact_ids, list):
             artifact_ids = []
+        normalized_artifact_ids = [str(item).strip() for item in artifact_ids if str(item).strip()][:20]
+        if confidence == "confirmed" and source != "user":
+            confidence = "verified" if normalized_artifact_ids else "working"
+        if confidence == "verified" and not normalized_artifact_ids:
+            confidence = "working"
         return MemoryEntry(
             key=key,
             section=section,
@@ -373,7 +394,7 @@ class MemoryStore:
             use_when=use_when[:500],
             source=source[:64],
             confidence=confidence[:32],
-            artifact_ids=[str(item).strip() for item in artifact_ids if str(item).strip()][:20],
+            artifact_ids=normalized_artifact_ids,
             updated_at=str(payload.get("updated_at") or default_updated_at or now_iso()),
         )
 
@@ -402,6 +423,18 @@ def memory_entry_signature(entry: MemoryEntry) -> tuple[Any, ...]:
         entry.confidence,
         tuple(entry.artifact_ids),
     )
+
+
+def memory_entry_is_resumable(entry: MemoryEntry) -> bool:
+    if not entry.use_when and entry.key not in {"workspace.primary_objective", "workspace.current_focus"}:
+        return False
+    if entry.section == "decisions":
+        return entry.source == "user" and entry.confidence == "confirmed"
+    if entry.section == "confirmed_facts":
+        return (entry.source == "user" and entry.confidence == "confirmed") or (
+            entry.confidence == "verified" and bool(entry.artifact_ids)
+        )
+    return True
 
 
 def now_iso() -> str:
