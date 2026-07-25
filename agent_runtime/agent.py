@@ -23,6 +23,7 @@ from .models import (
     RuntimeStepTrace,
     SkillDefinition,
     SkillExecutionContext,
+    SkillPackage,
     ToolCallTrace,
 )
 from .permissions import is_allowed
@@ -95,6 +96,47 @@ MCP_ACTIVATE_SERVER_TOOL = {
                 }
             },
             "required": ["server_id"],
+            "additionalProperties": False,
+        },
+    },
+}
+CREATE_SKILL_PACKAGE_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "create_skill_package",
+        "description": (
+            "Create one new validated agent-runtime skill package after the skill-author harness is activated. "
+            "Supply the complete SKILL.md and optional UTF-8 text resources such as skill.py or references/*.md. "
+            "The name is read from SKILL.md frontmatter and must match the package directory."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "skill_markdown": {
+                    "type": "string",
+                    "description": "Complete SKILL.md content, including YAML frontmatter and a non-empty body.",
+                },
+                "files": {
+                    "type": "array",
+                    "description": "Optional additional UTF-8 text files. Do not include SKILL.md here.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string", "description": "Relative path, for example skill.py or references/examples.md."},
+                            "content": {"type": "string", "description": "Complete UTF-8 text content for the file."},
+                        },
+                        "required": ["path", "content"],
+                        "additionalProperties": False,
+                    },
+                    "default": [],
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "Defaults to false. Set true only after the user explicitly confirms replacement of an existing same-named package.",
+                    "default": False,
+                },
+            },
+            "required": ["skill_markdown"],
             "additionalProperties": False,
         },
     },
@@ -449,6 +491,7 @@ class AgentRuntime:
             *[skill.name for skill in self._select_executable_skills(request, agent, available_skills)],
             "activate_skill",
             "activate_mcp_server",
+            "create_skill_package",
             "read_skill_resource",
             "request_user_input",
             "list_artifacts",
@@ -479,6 +522,7 @@ class AgentRuntime:
                 bool(available_skills),
                 mcp_tools=mcp_tools,
                 include_mcp_activation=MCP_HARNESS_NAME in available_skills,
+                include_skill_authoring=any(skill.name == "skill-author" for skill in activated_skills),
                 include_artifact_read=artifact_read_available,
             )
             skill_by_name = {skill.name: skill for skill in executable_skills}
@@ -614,6 +658,7 @@ class AgentRuntime:
                         *[tool.function_name for tool in mcp_tools],
                         "activate_skill",
                         "activate_mcp_server",
+                        "create_skill_package",
                         "read_skill_resource",
                         "request_user_input",
                         "list_artifacts",
@@ -655,6 +700,9 @@ class AgentRuntime:
                     self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "read_skill_resource":
                     result = self._read_skill_resource(args, activated_skills)
+                    self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
+                elif tool_name == "create_skill_package":
+                    result = self._create_skill_package(args, activated_skills)
                     self._record_call_step(steps, on_step, run_id, "runtime_call", tool_name, tool_call_id, result)
                 elif tool_name == "list_artifacts":
                     limit = self._coerce_int(args.get("limit"), 50)
@@ -1973,6 +2021,7 @@ class AgentRuntime:
         *,
         mcp_tools: list[McpToolDefinition] | None = None,
         include_mcp_activation: bool = False,
+        include_skill_authoring: bool = False,
         include_artifact_read: bool = False,
     ) -> list[dict[str, Any]]:
         result = [
@@ -1989,6 +2038,8 @@ class AgentRuntime:
             result.insert(1, READ_SKILL_RESOURCE_TOOL)
         if include_mcp_activation:
             result.insert(2 if include_skill_activation else 0, MCP_ACTIVATE_SERVER_TOOL)
+        if include_skill_authoring:
+            result.insert(2 if include_skill_activation else 0, CREATE_SKILL_PACKAGE_TOOL)
         return result
 
     async def _activate_skill(
@@ -2077,6 +2128,38 @@ class AgentRuntime:
             "path": resource_path,
             "content": content,
         }
+
+    def _create_skill_package(
+        self,
+        args: dict[str, Any],
+        activated_skills: list[SkillDefinition],
+    ) -> dict[str, Any]:
+        if not any(skill.name == "skill-author" for skill in activated_skills):
+            return {
+                "success": False,
+                "error": "Activate the skill-author skill before creating a skill package.",
+            }
+        skill_markdown = args.get("skill_markdown")
+        files = args.get("files", [])
+        overwrite = args.get("overwrite", False)
+        if not isinstance(skill_markdown, str):
+            return {"success": False, "error": "skill_markdown must be a string."}
+        if not isinstance(files, list):
+            return {"success": False, "error": "files must be an array of text files."}
+        if not isinstance(overwrite, bool):
+            return {"success": False, "error": "overwrite must be a boolean."}
+        try:
+            package = SkillPackage.model_validate(
+                {
+                    "content": skill_markdown,
+                    "files": files,
+                    "overwrite": overwrite,
+                }
+            )
+            created = self.registry.save_skill_package(package)
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+        return {"success": True, **created}
 
     async def _activate_mcp_server(
         self,

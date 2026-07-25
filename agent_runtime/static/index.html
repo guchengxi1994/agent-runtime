@@ -41,12 +41,66 @@
 
       @layer components {
         .shell {
-          @apply relative mx-auto grid min-h-screen w-full max-w-6xl place-items-center px-3 py-4 sm:px-6 sm:py-6;
+          @apply relative flex h-screen min-h-0 w-full overflow-hidden bg-zinc-100;
+        }
+        .app-sidebar {
+          @apply flex h-full w-60 shrink-0 flex-col border-r border-zinc-200 bg-white;
+        }
+        .app-brand {
+          @apply flex h-[72px] shrink-0 items-center gap-3 border-b border-zinc-200 px-5;
+        }
+        .app-mark {
+          @apply grid h-9 w-9 place-items-center rounded-xl bg-zinc-900 text-xs font-bold tracking-wide text-white;
+        }
+        .app-brand-copy {
+          @apply min-w-0;
+        }
+        .app-brand-copy strong {
+          @apply block truncate text-sm font-semibold text-zinc-950;
+        }
+        .app-brand-copy span {
+          @apply block truncate text-xs text-zinc-500;
+        }
+        .sidebar-nav {
+          @apply min-h-0 flex-1 overflow-y-auto px-3 py-4;
+        }
+        .sidebar-nav-label {
+          @apply mb-2 px-3 text-[11px] font-semibold uppercase tracking-[0.1em] text-zinc-400;
+        }
+        .sidebar-nav-button {
+          @apply relative mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm font-medium text-zinc-600 transition hover:bg-zinc-100 hover:text-zinc-950 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 focus-visible:ring-offset-2;
+        }
+        .sidebar-nav-button svg {
+          @apply h-[18px] w-[18px] shrink-0;
+        }
+        .sidebar-nav-button[aria-current="page"] {
+          @apply bg-cyan-50 font-semibold text-cyan-800;
+        }
+        .sidebar-nav-button[aria-current="page"]::before {
+          content: "";
+          @apply absolute bottom-2 left-0 top-2 w-0.5 rounded-r bg-cyan-600;
+        }
+        .app-main {
+          @apply flex min-w-0 flex-1 flex-col overflow-hidden;
+        }
+        .app-topbar {
+          @apply flex h-[72px] shrink-0 items-center border-b border-zinc-200 bg-white px-5 sm:px-6;
+        }
+        .app-topbar-title {
+          @apply truncate text-base font-semibold text-zinc-950;
+        }
+        .app-content {
+          @apply min-h-0 flex-1 overflow-y-auto p-3 sm:p-5;
+        }
+        .page-view {
+          @apply h-full min-h-0;
+        }
+        .page-view[hidden] {
+          display: none;
         }
         .chat-panel {
-          @apply grid w-full overflow-hidden rounded-[28px] border border-zinc-200/80 bg-white/90 backdrop-blur;
-          box-shadow: 0 24px 80px rgba(24, 24, 27, 0.08);
-          min-height: calc(100vh - 2rem);
+          @apply grid h-full min-h-[38rem] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-white;
+          box-shadow: 0 10px 28px rgba(24, 24, 27, 0.05);
           grid-template-rows: auto minmax(0, 1fr) auto;
         }
         .chat-header,
@@ -278,6 +332,128 @@
         .step-waiting_for_user .step-kind { @apply bg-amber-600; }
         .run-step p { @apply mt-2 text-[13px] leading-6 text-zinc-600; }
         .run-step pre { @apply mt-3 max-h-60 overflow-auto rounded-xl bg-zinc-950 px-3 py-3 text-[12px] text-zinc-100; }
+        .studio-layout {
+          @apply grid h-full min-h-[38rem] gap-4 xl:grid-cols-[minmax(0,1fr)_22rem];
+        }
+        .studio-panel {
+          @apply min-w-0 overflow-hidden rounded-2xl border border-zinc-200 bg-white;
+          box-shadow: 0 10px 28px rgba(24, 24, 27, 0.05);
+        }
+        .studio-panel-header {
+          @apply flex items-center justify-between gap-4 border-b border-zinc-200 px-5 py-4;
+        }
+        .studio-panel-header h2 {
+          @apply m-0 text-base font-semibold text-zinc-950;
+        }
+        .studio-panel-header p {
+          @apply m-0 text-xs text-zinc-500;
+        }
+        .skill-form {
+          @apply grid gap-5 p-5;
+        }
+        .skill-field-grid {
+          @apply grid gap-4 sm:grid-cols-2;
+        }
+        .skill-field {
+          @apply grid gap-1.5;
+        }
+        .skill-field-label {
+          @apply text-sm font-medium text-zinc-800;
+        }
+        .skill-field-note {
+          @apply text-xs leading-5 text-zinc-500;
+        }
+        .skill-field-input {
+          @apply h-10 w-full rounded-lg border border-zinc-300 bg-white px-3 text-sm text-zinc-900 outline-none transition placeholder:text-zinc-400 focus:border-cyan-500 focus:ring-4 focus:ring-cyan-500/10;
+        }
+        .skill-field-textarea {
+          @apply min-h-[13rem] rounded-xl border-zinc-300 bg-white;
+        }
+        .mode-selector {
+          @apply grid grid-cols-3 rounded-lg border border-zinc-200 bg-zinc-50 p-1;
+        }
+        .mode-option {
+          @apply relative cursor-pointer;
+        }
+        .mode-option input {
+          @apply sr-only;
+        }
+        .mode-option span {
+          @apply flex h-8 items-center justify-center rounded-md px-2 text-xs font-medium text-zinc-500 transition;
+        }
+        .mode-option input:checked + span {
+          @apply bg-white text-zinc-950 shadow-sm ring-1 ring-zinc-200;
+        }
+        .skill-form-actions {
+          @apply flex items-center justify-between gap-3 border-t border-zinc-100 pt-4;
+        }
+        .skill-form-actions small {
+          @apply text-xs text-zinc-500;
+        }
+        .primary svg,
+        .ghost svg {
+          @apply mr-2 h-4 w-4;
+        }
+        .skill-result-panel {
+          @apply flex min-h-0 flex-col;
+        }
+        .skill-result {
+          @apply min-h-0 flex-1 overflow-y-auto p-5;
+        }
+        .skill-result-empty {
+          @apply flex h-full min-h-56 items-center justify-center text-center text-sm leading-6 text-zinc-500;
+        }
+        .creation-state {
+          @apply grid gap-4;
+        }
+        .creation-state-head {
+          @apply flex items-start gap-3;
+        }
+        .creation-state-icon {
+          @apply grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-cyan-50 text-cyan-700;
+        }
+        .creation-state-icon svg {
+          @apply h-[18px] w-[18px];
+        }
+        .creation-state-head strong {
+          @apply block text-sm font-semibold text-zinc-950;
+        }
+        .creation-state-head p {
+          @apply mt-1 text-xs leading-5 text-zinc-500;
+        }
+        .creation-detail {
+          @apply border-t border-zinc-100 pt-4;
+        }
+        .creation-detail-label {
+          @apply mb-2 block text-[11px] font-semibold uppercase tracking-[0.09em] text-zinc-500;
+        }
+        .creation-package-name {
+          @apply font-mono text-sm font-semibold text-zinc-900;
+        }
+        .creation-files {
+          @apply mt-2 flex flex-wrap gap-1.5;
+        }
+        .creation-file {
+          @apply rounded-md bg-zinc-100 px-2 py-1 font-mono text-[11px] text-zinc-600;
+        }
+        .creation-log {
+          @apply grid gap-2;
+        }
+        .creation-log-row {
+          @apply flex items-center gap-2 text-xs text-zinc-600;
+        }
+        .creation-log-dot {
+          @apply h-1.5 w-1.5 shrink-0 rounded-full bg-cyan-500;
+        }
+        .creation-error {
+          @apply rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700;
+        }
+        .skill-name-state {
+          @apply min-h-5 text-xs leading-5 text-zinc-500;
+        }
+        .skill-name-state.conflict {
+          @apply text-amber-700;
+        }
       }
 
       @layer utilities {
@@ -321,8 +497,31 @@
       }
 
       @media (max-width: 720px) {
+        .app-sidebar {
+          @apply w-16;
+        }
+        .app-brand {
+          @apply justify-center px-0;
+        }
+        .app-brand-copy,
+        .sidebar-nav-label,
+        .sidebar-nav-button .nav-label {
+          @apply sr-only;
+        }
+        .sidebar-nav {
+          @apply px-2;
+        }
+        .sidebar-nav-button {
+          @apply justify-center px-0;
+        }
+        .app-topbar {
+          @apply h-14 px-4;
+        }
+        .app-content {
+          @apply p-2;
+        }
         .chat-panel {
-          min-height: calc(100vh - 1rem);
+          min-height: calc(100vh - 4.5rem);
         }
         .chat-header,
         .composer-actions {
@@ -351,16 +550,51 @@
         .primary {
           @apply w-full;
         }
+        .studio-layout {
+          @apply h-auto min-h-0 grid-cols-1;
+        }
+        .studio-panel {
+          @apply min-h-[30rem];
+        }
+        .skill-form-actions {
+          @apply items-stretch flex-col;
+        }
       }
     </style>
   </head>
   <body>
     <main class="shell">
-      <section class="chat-panel" aria-label="Agent Runtime chat">
+      <aside class="app-sidebar" aria-label="主导航">
+        <div class="app-brand">
+          <div class="app-mark" aria-hidden="true">AR</div>
+          <div class="app-brand-copy">
+            <strong>Agent Runtime</strong>
+            <span>工作台</span>
+          </div>
+        </div>
+        <nav class="sidebar-nav">
+          <div class="sidebar-nav-label">工作区</div>
+          <button class="sidebar-nav-button" type="button" data-view="chat" aria-current="page" title="对话">
+            <i data-lucide="messages-square" aria-hidden="true"></i>
+            <span class="nav-label">对话</span>
+          </button>
+          <button class="sidebar-nav-button" type="button" data-view="skills" aria-current="false" title="Skill 创建">
+            <i data-lucide="wand-sparkles" aria-hidden="true"></i>
+            <span class="nav-label">Skill</span>
+          </button>
+        </nav>
+      </aside>
+
+      <section class="app-main">
+        <header class="app-topbar">
+          <div class="app-topbar-title" id="topbarTitle">对话</div>
+        </header>
+        <div class="app-content">
+          <section class="page-view" id="chatView" aria-label="Agent Runtime 对话">
+            <section class="chat-panel">
         <header class="chat-header">
           <div>
-            <p class="eyebrow">Agent Runtime</p>
-            <h3>对话入口</h3>
+            <span class="conversation-id">默认 Agent</span>
           </div>
           <div class="header-actions">
             <select class="chart-renderer-select" id="chartRendererSelect" aria-label="Chart renderer">
@@ -426,10 +660,73 @@
             <button class="primary" id="sendButton" type="submit">发送</button>
           </div>
         </form>
+            </section>
+          </section>
+
+          <section class="page-view" id="skillStudioView" aria-label="Skill 创建" hidden>
+            <div class="studio-layout">
+              <section class="studio-panel" aria-labelledby="skillCreateTitle">
+                <header class="studio-panel-header">
+                  <div>
+                    <h2 id="skillCreateTitle">创建 Skill</h2>
+                    <p>由 skill-author 生成并写入 registry</p>
+                  </div>
+                  <span class="skill-name-state" id="skillCatalogState"></span>
+                </header>
+                <form class="skill-form" id="skillAuthorForm">
+                  <div class="skill-field-grid">
+                    <label class="skill-field" for="skillNameInput">
+                      <span class="skill-field-label">Skill 名称</span>
+                      <input class="skill-field-input" id="skillNameInput" type="text" maxlength="64" placeholder="可选，例如 customer-lookup" />
+                      <span class="skill-name-state" id="skillNameState"></span>
+                    </label>
+                    <fieldset class="skill-field">
+                      <legend class="skill-field-label">执行方式</legend>
+                      <div class="mode-selector" role="radiogroup" aria-label="执行方式">
+                        <label class="mode-option"><input type="radio" name="skillMode" value="auto" checked /><span>自动</span></label>
+                        <label class="mode-option"><input type="radio" name="skillMode" value="harness" /><span>Harness</span></label>
+                        <label class="mode-option"><input type="radio" name="skillMode" value="executable" /><span>Executable</span></label>
+                      </div>
+                      <span class="skill-field-note">仅在需要隔离代码执行时选择 Executable。</span>
+                    </fieldset>
+                  </div>
+                  <label class="skill-field" for="skillDescriptionInput">
+                    <span class="skill-field-label">能力描述</span>
+                    <textarea class="skill-field-textarea" id="skillDescriptionInput" rows="8" placeholder="描述 Agent 需要完成的工作、必要输入、约束，以及是否需要调用已有 MCP 工具。"></textarea>
+                  </label>
+                  <label class="skill-field" for="skillConstraintsInput">
+                    <span class="skill-field-label">补充约束</span>
+                    <input class="skill-field-input" id="skillConstraintsInput" type="text" placeholder="可选，例如仅使用 customer-data/lookup，不允许外部写入" />
+                  </label>
+                  <div class="skill-form-actions">
+                    <small>名称冲突时，skill-author 会要求确认后才覆盖。</small>
+                    <button class="primary" id="createSkillButton" type="submit">
+                      <i data-lucide="wand-sparkles" aria-hidden="true"></i>
+                      创建 Skill
+                    </button>
+                  </div>
+                </form>
+              </section>
+
+              <section class="studio-panel skill-result-panel" aria-labelledby="skillResultTitle">
+                <header class="studio-panel-header">
+                  <div>
+                    <h2 id="skillResultTitle">创建记录</h2>
+                    <p id="skillResultMeta">尚未开始</p>
+                  </div>
+                </header>
+                <div class="skill-result" id="skillResult" aria-live="polite">
+                  <div class="skill-result-empty">提交能力描述后，这里会显示创建过程与生成的包文件。</div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
       </section>
     </main>
 
     <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
-    <script src="/static/app.js?v=20260720-async-resume-memory"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="/static/app.js?v=20260725-skill-studio"></script>
   </body>
 </html>

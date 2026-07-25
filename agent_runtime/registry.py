@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import shutil
+import uuid
 from pathlib import Path
 
 import yaml
@@ -13,6 +15,7 @@ from .models import (
     PermissionPolicy,
     SkillDefinition,
     SkillPackage,
+    SkillPackageFile,
     SkillResource,
     SkillSummary,
     UserContext,
@@ -22,6 +25,13 @@ from .permissions import is_allowed
 
 class RegistryError(RuntimeError):
     pass
+
+
+MAX_SKILL_PACKAGE_FILES = 32
+MAX_SKILL_FILE_BYTES = 256 * 1024
+MAX_SKILL_PACKAGE_BYTES = 1024 * 1024
+FORBIDDEN_SKILL_FILE_SUFFIXES = {".pyc", ".pyo", ".pem", ".key", ".p12", ".pfx", ".crt", ".cer"}
+FORBIDDEN_SKILL_FILE_NAMES = {"skill.md", ".env", ".env.local", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 
 
 class FileRegistry:
@@ -52,7 +62,7 @@ class FileRegistry:
 
     def _load_skills(self) -> dict[str, SkillDefinition]:
         skills: dict[str, SkillDefinition] = {}
-        for path in sorted(item for item in self.skills_dir.iterdir() if item.is_dir()):
+        for path in sorted(item for item in self.skills_dir.iterdir() if item.is_dir() and not item.name.startswith(".")):
             skill = self._load_skill_package(path)
             if skill.name == "mcp":
                 raise RegistryError("Skill name `mcp` is reserved for the built-in MCP harness")
@@ -133,13 +143,155 @@ class FileRegistry:
         self.reload()
 
     def save_skill(self, skill: SkillPackage) -> str:
-        frontmatter, _ = parse_skill_markdown(skill.content)
-        name = normalize_required_string(frontmatter, "name", self.skills_dir)
+        """Backward-compatible admin save: replacing an existing package is explicit here."""
+        result = self.save_skill_package(skill.model_copy(update={"overwrite": True}))
+        return str(result["name"])
+
+    def save_skill_package(self, skill: SkillPackage) -> dict[str, object]:
+        """Atomically create or replace one validated, text-only skill package."""
+        name, normalized_content, normalized_files, definition = self._validate_skill_package(skill)
         skill_dir = self.skills_dir / name
-        skill_dir.mkdir(parents=True, exist_ok=True)
-        (skill_dir / "SKILL.md").write_text(skill.content.strip() + "\n", encoding="utf-8")
-        self.reload()
-        return name
+        self.skills_dir.mkdir(parents=True, exist_ok=True)
+        if skill_dir.exists() and not skill.overwrite:
+            raise RegistryError(f"Skill package already exists: {name}. Set overwrite=true only after explicit confirmation.")
+
+        staging_dir = self.skills_dir / f".{name}.staging-{uuid.uuid4().hex}"
+        backup_dir: Path | None = None
+        try:
+            staging_dir.mkdir()
+            (staging_dir / "SKILL.md").write_text(normalized_content, encoding="utf-8")
+            for item in normalized_files:
+                target = staging_dir / item.path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(item.content, encoding="utf-8")
+
+            if skill_dir.exists():
+                backup_dir = self.skills_dir / f".{name}.backup-{uuid.uuid4().hex}"
+                skill_dir.replace(backup_dir)
+            staging_dir.replace(skill_dir)
+            self.reload()
+        except Exception as exc:
+            if backup_dir is not None and backup_dir.exists():
+                if skill_dir.exists():
+                    shutil.rmtree(skill_dir)
+                backup_dir.replace(skill_dir)
+                try:
+                    self.reload()
+                except Exception:
+                    pass
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir)
+            if isinstance(exc, RegistryError):
+                raise
+            raise RegistryError(f"Unable to save skill package {name}: {exc}") from exc
+        else:
+            if backup_dir is not None and backup_dir.exists():
+                shutil.rmtree(backup_dir)
+
+        return {
+            "name": name,
+            "path": str(skill_dir),
+            "executable": definition.executable,
+            "files": ["SKILL.md", *[item.path for item in normalized_files]],
+        }
+
+    def _validate_skill_package(
+        self,
+        skill: SkillPackage,
+    ) -> tuple[str, str, list[SkillPackageFile], SkillDefinition]:
+        if len(skill.files) > MAX_SKILL_PACKAGE_FILES:
+            raise RegistryError(f"A skill package can contain at most {MAX_SKILL_PACKAGE_FILES} additional files")
+        if not isinstance(skill.content, str) or not skill.content.strip():
+            raise RegistryError("SKILL.md content is required")
+
+        normalized_content = skill.content.strip() + "\n"
+        content_size = len(normalized_content.encode("utf-8"))
+        if content_size > MAX_SKILL_FILE_BYTES:
+            raise RegistryError(f"SKILL.md exceeds the {MAX_SKILL_FILE_BYTES} byte limit")
+
+        frontmatter, body = parse_skill_markdown(normalized_content)
+        name = normalize_required_string(frontmatter, "name", self.skills_dir)
+        description = normalize_required_string(frontmatter, "description", self.skills_dir)
+        if not body.strip():
+            raise RegistryError(f"Skill {name} has empty SKILL.md body")
+        metadata = frontmatter.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            raise RegistryError(f"Skill {name} metadata must be an object")
+        runtime_meta = extract_runtime_metadata(metadata)
+        try:
+            definition = SkillDefinition.model_validate(
+                {
+                    "name": name,
+                    "description": description,
+                    "enabled": normalize_enabled(metadata),
+                    "permissions": extract_permissions(metadata),
+                    "metadata": metadata,
+                    "capability_hints": normalize_string_list(
+                        runtime_meta.get("capabilities") or runtime_meta.get("capability_hints")
+                    ),
+                    "mcp_dependencies": runtime_meta.get("mcp_dependencies") or [],
+                    "executable": normalize_bool(runtime_meta.get("executable"), False),
+                    "parameters_schema": normalize_object(
+                        runtime_meta.get("parameters_schema") or runtime_meta.get("parameters"),
+                        {"type": "object", "properties": {}, "additionalProperties": False},
+                    ),
+                    "execution_policy": normalize_object(runtime_meta.get("execution_policy"), {}),
+                    "required_secrets": normalize_string_map(runtime_meta.get("required_secrets")),
+                    "entrypoint": normalize_optional_string(runtime_meta.get("entrypoint")) or "skill.py",
+                    "body": body.strip(),
+                    "resources": [],
+                    "skill_dir": str(self.skills_dir / name),
+                    "skill_file": str(self.skills_dir / name / "SKILL.md"),
+                }
+            )
+        except ValidationError as exc:
+            raise RegistryError(f"Invalid skill package {name}: {exc}") from exc
+
+        normalized_files: list[SkillPackageFile] = []
+        seen_paths: set[str] = set()
+        total_size = content_size
+        for item in skill.files:
+            path = self._normalize_skill_package_path(item.path)
+            if path in seen_paths:
+                raise RegistryError(f"Duplicate skill package file: {path}")
+            seen_paths.add(path)
+            if not isinstance(item.content, str):
+                raise RegistryError(f"Skill package file {path} must contain UTF-8 text")
+            file_size = len(item.content.encode("utf-8"))
+            if file_size > MAX_SKILL_FILE_BYTES:
+                raise RegistryError(f"Skill package file {path} exceeds the {MAX_SKILL_FILE_BYTES} byte limit")
+            total_size += file_size
+            normalized_files.append(SkillPackageFile(path=path, content=item.content))
+        if total_size > MAX_SKILL_PACKAGE_BYTES:
+            raise RegistryError(f"Skill package exceeds the {MAX_SKILL_PACKAGE_BYTES} byte limit")
+
+        entrypoint = definition.entrypoint.replace("\\", "/")
+        if definition.executable and entrypoint not in seen_paths:
+            raise RegistryError(f"Executable skill {name} must include its entrypoint file: {definition.entrypoint}")
+        return name, normalized_content, normalized_files, definition
+
+    @staticmethod
+    def _normalize_skill_package_path(raw_path: str) -> str:
+        if not isinstance(raw_path, str):
+            raise RegistryError("Skill package file paths must be strings")
+        path = raw_path.strip().replace("\\", "/")
+        candidate = Path(path)
+        if (
+            not path
+            or candidate.is_absolute()
+            or candidate.drive
+            or ".." in candidate.parts
+            or "." in candidate.parts
+        ):
+            raise RegistryError(f"Invalid skill package file path: {raw_path}")
+        if any(part.startswith(".") or part == "__pycache__" for part in candidate.parts):
+            raise RegistryError(f"Hidden or cache files are not allowed in skill packages: {raw_path}")
+        if candidate.name.lower() in FORBIDDEN_SKILL_FILE_NAMES or candidate.suffix.lower() in FORBIDDEN_SKILL_FILE_SUFFIXES:
+            raise RegistryError(f"Sensitive or binary file types are not allowed in skill packages: {raw_path}")
+        normalized = candidate.as_posix()
+        if normalized.lower() == "skill.md":
+            raise RegistryError("SKILL.md must be supplied only through skill_markdown")
+        return normalized
 
     def get_agent(self, agent_id: str) -> AgentDefinition:
         agent = self.agents.get(agent_id)

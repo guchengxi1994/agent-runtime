@@ -181,10 +181,23 @@ class SkillDefinition(BaseModel):
         }
 
 
+class SkillPackageFile(BaseModel):
+    """A UTF-8 text resource supplied with a skill package."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    content: str
+
+
 class SkillPackage(BaseModel):
+    """A skill package ready to be validated and stored by the registry."""
+
     model_config = ConfigDict(extra="forbid")
 
     content: str
+    files: list[SkillPackageFile] = Field(default_factory=list)
+    overwrite: bool = False
 
 
 class AgentDefinition(BaseModel):

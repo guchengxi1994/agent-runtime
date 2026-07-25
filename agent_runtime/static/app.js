@@ -2,6 +2,11 @@ const state = {
   conversationId: null,
   workspaceId: "",
   chartRenderer: "auto",
+  activeView: "chat",
+  skillAuthorConversationId: null,
+  skillAuthorWorkspaceId: "",
+  skillCatalog: [],
+  skillCreation: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -300,6 +305,243 @@ async function fetchJson(url, options = {}) {
     throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
   }
   return data;
+}
+
+function refreshIcons() {
+  if (window.lucide && typeof window.lucide.createIcons === "function") {
+    window.lucide.createIcons();
+  }
+}
+
+function setActiveView(view) {
+  const isSkillStudio = view === "skills";
+  state.activeView = isSkillStudio ? "skills" : "chat";
+  $("chatView").hidden = state.activeView !== "chat";
+  $("skillStudioView").hidden = state.activeView !== "skills";
+  $("topbarTitle").textContent = state.activeView === "skills" ? "Skill 创建" : "对话";
+  for (const button of document.querySelectorAll("[data-view]")) {
+    button.setAttribute("aria-current", button.dataset.view === state.activeView ? "page" : "false");
+  }
+  if (state.activeView === "skills") {
+    loadSkillCatalog();
+    window.setTimeout(() => $("skillDescriptionInput").focus(), 0);
+  } else {
+    window.setTimeout(() => $("messageInput").focus(), 0);
+  }
+}
+
+async function loadSkillCatalog() {
+  const catalogState = $("skillCatalogState");
+  catalogState.textContent = "读取中...";
+  try {
+    const payload = await fetchJson("/skills");
+    state.skillCatalog = Array.isArray(payload.skills) ? payload.skills : [];
+    catalogState.textContent = `已注册 ${state.skillCatalog.length}`;
+    updateSkillNameState();
+  } catch (error) {
+    catalogState.textContent = "列表读取失败";
+  }
+}
+
+function updateSkillNameState() {
+  const input = $("skillNameInput");
+  const stateNode = $("skillNameState");
+  const name = input.value.trim();
+  stateNode.classList.remove("conflict");
+  if (!name) {
+    stateNode.textContent = "留空时由 skill-author 命名。";
+    return;
+  }
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(name)) {
+    stateNode.textContent = "使用小写字母、数字和连字符。";
+    stateNode.classList.add("conflict");
+    return;
+  }
+  if (state.skillCatalog.some((skill) => skill && skill.name === name)) {
+    stateNode.textContent = "名称已存在，创建前需要明确确认覆盖。";
+    stateNode.classList.add("conflict");
+    return;
+  }
+  stateNode.textContent = "名称可用。";
+}
+
+function buildSkillAuthorPrompt() {
+  const description = $("skillDescriptionInput").value.trim();
+  const name = $("skillNameInput").value.trim();
+  const constraints = $("skillConstraintsInput").value.trim();
+  const mode = document.querySelector('input[name="skillMode"]:checked')?.value || "auto";
+  const modeDescription = {
+    auto: "由你判断使用 harness 还是 executable。",
+    harness: "优先创建 harness-only skill；只有明确无法满足时才请求补充信息。",
+    executable: "创建 executable skill，并在需要时提供最小的 sandboxed skill.py。",
+  }[mode];
+  const details = [
+    "请使用已经激活的 skill-author 创建一个新的 agent-runtime skill package。",
+    `能力描述：${description}`,
+    `执行方式：${modeDescription}`,
+  ];
+  if (name) {
+    details.push(`期望 skill 名称：${name}`);
+  }
+  if (constraints) {
+    details.push(`补充约束：${constraints}`);
+  }
+  details.push("先检查名称冲突和必要依赖；没有阻塞信息时调用 create_skill_package。不要只给出示例文件。完成后简要说明生成结果。");
+  return details.join("\n\n");
+}
+
+function buildSkillAuthorRequest(message) {
+  const body = new FormData();
+  body.append("message", message);
+  body.append("skill_ids", "skill-author");
+  if (state.skillAuthorConversationId) {
+    body.append("conversation_id", state.skillAuthorConversationId);
+  }
+  if (state.skillAuthorWorkspaceId) {
+    body.append("workspace_id", state.skillAuthorWorkspaceId);
+  }
+  return body;
+}
+
+function skillPackageFromToolCalls(toolCalls = []) {
+  return toolCalls.find(
+    (toolCall) => toolCall && toolCall.tool_name === "create_skill_package" && toolCall.result && toolCall.result.success === true,
+  );
+}
+
+function skillAuthorFailureFromToolCalls(toolCalls = []) {
+  return toolCalls.find(
+    (toolCall) => toolCall && toolCall.tool_name === "create_skill_package" && toolCall.result && toolCall.result.success === false,
+  );
+}
+
+function renderSkillCreation() {
+  const target = $("skillResult");
+  const meta = $("skillResultMeta");
+  const creation = state.skillCreation;
+  if (!creation) {
+    meta.textContent = "尚未开始";
+    target.innerHTML = '<div class="skill-result-empty">提交能力描述后，这里会显示创建过程与生成的包文件。</div>';
+    return;
+  }
+
+  const labels = {
+    creating: ["正在创建", "skill-author 正在规划并生成 package。", "loader-circle"],
+    waiting: ["等待补充", "创建需要额外的用户信息。", "circle-help"],
+    success: ["创建完成", "新 skill 已写入 registry 并完成 reload。", "circle-check"],
+    failed: ["创建失败", "本次没有写入新的 skill package。", "circle-alert"],
+  };
+  const [title, description, icon] = labels[creation.status] || labels.failed;
+  meta.textContent = title;
+  const packageResult = creation.packageResult?.result || null;
+  const files = Array.isArray(packageResult?.files) ? packageResult.files : [];
+  const steps = (creation.steps || []).slice(-6);
+  const requested = Array.isArray(creation.requestedInputs) ? creation.requestedInputs : [];
+  const requestDetails = requested.length
+    ? `<div class="creation-detail"><span class="creation-detail-label">需要补充</span>${requested
+        .map(
+          (field) =>
+            `<div class="creation-log-row"><span class="creation-log-dot"></span><span>${escapeText(field.label || field.name || "补充信息")}${field.description ? `：${escapeText(field.description)}` : ""}</span></div>`,
+        )
+        .join("")}</div>`
+    : "";
+  const packageDetails = packageResult
+    ? `<div class="creation-detail"><span class="creation-detail-label">已写入</span><div class="creation-package-name">${escapeText(packageResult.name || "unnamed-skill")}</div><div class="creation-files">${files.map((file) => `<span class="creation-file">${escapeText(file)}</span>`).join("")}</div></div>`
+    : "";
+  const message = creation.message
+    ? `<div class="creation-detail"><span class="creation-detail-label">运行结果</span><div class="text-xs leading-5 text-zinc-600">${renderInlineMarkdown(creation.message)}</div></div>`
+    : "";
+  const log = steps.length
+    ? `<div class="creation-detail"><span class="creation-detail-label">运行步骤</span><div class="creation-log">${steps
+        .map(
+          (step) =>
+            `<div class="creation-log-row"><span class="creation-log-dot"></span><span>${escapeText(step.label || step.kind || "运行中")}</span></div>`,
+        )
+        .join("")}</div></div>`
+    : "";
+  const error = creation.error ? `<div class="creation-error">${escapeText(creation.error)}</div>` : "";
+  target.innerHTML = `
+    <div class="creation-state">
+      <div class="creation-state-head">
+        <div class="creation-state-icon"><i data-lucide="${icon}" aria-hidden="true"></i></div>
+        <div><strong>${title}</strong><p>${description}</p></div>
+      </div>
+      ${error}
+      ${packageDetails}
+      ${requestDetails}
+      ${message}
+      ${log}
+    </div>
+  `;
+  refreshIcons();
+}
+
+async function createSkillFromStudio(event) {
+  event.preventDefault();
+  const description = $("skillDescriptionInput").value.trim();
+  if (!description) {
+    state.skillCreation = { status: "failed", error: "请先填写能力描述。", steps: [] };
+    renderSkillCreation();
+    $("skillDescriptionInput").focus();
+    return;
+  }
+
+  const button = $("createSkillButton");
+  const originalText = button.textContent.trim();
+  button.disabled = true;
+  button.textContent = "创建中";
+  state.skillCreation = { status: "creating", steps: [], message: "" };
+  renderSkillCreation();
+
+  try {
+    const response = await fetch("/chat/stream", {
+      method: "POST",
+      body: buildSkillAuthorRequest(buildSkillAuthorPrompt()),
+    });
+    if (!response.ok || !response.body) {
+      const text = await response.text();
+      throw new Error(text || response.statusText);
+    }
+    await consumeEventStream(response.body, {
+      step(step) {
+        state.skillCreation.steps.push(step);
+        renderSkillCreation();
+      },
+      message(payload) {
+        state.skillAuthorConversationId = payload.conversation_id || state.skillAuthorConversationId;
+        state.skillAuthorWorkspaceId = payload.workspace_id || state.skillAuthorWorkspaceId;
+        const packageResult = skillPackageFromToolCalls(payload.tool_calls || []);
+        const failedCall = skillAuthorFailureFromToolCalls(payload.tool_calls || []);
+        state.skillCreation = {
+          status: packageResult ? "success" : payload.status === "waiting_for_user" ? "waiting" : failedCall ? "failed" : "failed",
+          steps: payload.steps || state.skillCreation.steps,
+          message: payload.message || "",
+          packageResult,
+          requestedInputs: payload.requested_inputs || [],
+          error: failedCall?.result?.error || (packageResult || payload.status === "waiting_for_user" ? "" : "skill-author 未创建 package。"),
+        };
+        renderSkillCreation();
+        loadSkillCatalog();
+      },
+      error(payload) {
+        throw new Error(payload.error || "stream error");
+      },
+    });
+  } catch (error) {
+    state.skillCreation = {
+      ...state.skillCreation,
+      status: "failed",
+      error: `请求失败：${error.message}`,
+    };
+    renderSkillCreation();
+  } finally {
+    button.disabled = false;
+    button.innerHTML = '<i data-lucide="wand-sparkles" aria-hidden="true"></i>创建 Skill';
+    refreshIcons();
+    if (!originalText) {
+      button.textContent = "创建 Skill";
+    }
+  }
 }
 
 function renderUploadedFiles(files) {
@@ -1759,7 +2001,11 @@ function setChartRendererPreference(value, { rerender = true } = {}) {
 
 function init() {
   state.chartRenderer = loadChartRendererPreference();
+  for (const button of document.querySelectorAll("[data-view]")) {
+    button.addEventListener("click", () => setActiveView(button.dataset.view));
+  }
   $("chatForm").addEventListener("submit", sendMessage);
+  $("skillAuthorForm").addEventListener("submit", createSkillFromStudio);
   $("resetConversation").addEventListener("click", resetConversation);
   $("chartRendererSelect").addEventListener("change", (event) => {
     setChartRendererPreference(event.target.value);
@@ -1768,12 +2014,15 @@ function init() {
   $("workspaceInput").addEventListener("input", syncSessionMeta);
   $("refreshMemory").addEventListener("click", refreshMemory);
   $("retryMemory").addEventListener("click", retryMemory);
+  $("skillNameInput").addEventListener("input", updateSkillNameState);
   $("messageInput").addEventListener("keydown", (event) => {
     if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
       $("chatForm").requestSubmit();
     }
   });
   setChartRendererPreference(state.chartRenderer, { rerender: false });
+  updateSkillNameState();
+  refreshIcons();
   syncSessionMeta();
   $("messageInput").focus();
 }
