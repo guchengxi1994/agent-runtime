@@ -216,5 +216,15 @@ class ConversationState(BaseModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
     active_skill_ids: list[str] = Field(default_factory=list)
     pending_input_request: dict[str, Any] | None = None
+    context_summary: str | None = None
+    last_prompt_tokens: int | None = None
+    last_prompt_estimated_tokens: int | None = None
+    token_estimate_ratio: float = 1.0
+    cumulative_prompt_tokens: int = 0
+    cumulative_completion_tokens: int = 0
+    memory_context: str | None = None
+    memory_loaded: bool = False
+    memory_revision: int = 0
+    memory_dirty: bool = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

@@ -9,6 +9,7 @@ from agent_runtime.artifacts import ArtifactStore
 from agent_runtime.agent import AgentRuntime
 from agent_runtime.app import app
 from agent_runtime.config import AgentRuntimeSettings, load_settings
+from agent_runtime.memory import MemoryStore
 from agent_runtime.models import ChatAttachment, ChatRequest, PermissionPolicy, SkillSummary, UserContext
 from agent_runtime.permissions import is_allowed
 from agent_runtime.registry import FileRegistry
@@ -47,6 +48,7 @@ def make_settings(tmp_path) -> AgentRuntimeSettings:
         host="127.0.0.1",
         port=8010,
         model="test-model",
+        memory_model=None,
         openai_api_key="test-key",
         openai_base_url=None,
         reasoning_effort=None,
@@ -56,6 +58,11 @@ def make_settings(tmp_path) -> AgentRuntimeSettings:
         sandbox_url="http://127.0.0.1:8001",
         admin_token=None,
         max_runtime_rounds=1,
+        model_context_tokens=131072,
+        context_compaction_threshold=0.8,
+        memory_enabled=False,
+        memory_context_tokens=4000,
+        memory_max_entries=200,
         request_timeout_seconds=30,
     )
     settings.ensure_directories()
@@ -206,9 +213,12 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
         "\n".join(
             [
                 "AGENT_RUNTIME_MODEL=test-reasoning-model",
+                "AGENT_RUNTIME_MEMORY_MODEL=test-memory-model",
                 "OPENAI_API_KEY=test-env-key # local development key",
                 "OPENAI_BASE_URL=https://llm-gateway.example/v1",
                 "AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=true",
+                "AGENT_RUNTIME_MODEL_CONTEXT_TOKENS=64000",
+                "AGENT_RUNTIME_CONTEXT_COMPACTION_THRESHOLD=0.75",
                 f"AGENT_RUNTIME_REGISTRY_DIR={tmp_path / 'registry'}",
                 f"AGENT_RUNTIME_ARTIFACTS_DIR={tmp_path / 'artifacts'}",
             ]
@@ -217,6 +227,7 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("AGENT_RUNTIME_ENV_FILE", str(env_file))
     monkeypatch.delenv("AGENT_RUNTIME_MODEL", raising=False)
+    monkeypatch.delenv("AGENT_RUNTIME_MEMORY_MODEL", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("AGENT_RUNTIME_EXPOSE_REASONING_CONTENT", raising=False)
@@ -226,12 +237,15 @@ def test_load_settings_reads_env_file_for_model_base_url(tmp_path, monkeypatch):
     settings = load_settings()
 
     assert settings.model == "test-reasoning-model"
+    assert settings.memory_model == "test-memory-model"
     assert settings.openai_api_key == "test-env-key"
     assert settings.openai_base_url == "https://llm-gateway.example/v1"
     assert settings.env_file_loaded == str(env_file.resolve())
     assert settings.openai_api_key_source == f"dotenv:{env_file.resolve()}"
     assert settings.openai_base_url_source == f"dotenv:{env_file.resolve()}"
     assert settings.expose_reasoning_content is True
+    assert settings.model_context_tokens == 64000
+    assert settings.context_compaction_threshold == 0.75
     assert settings.artifacts_dir == (tmp_path / "artifacts").resolve()
 
 
@@ -300,7 +314,7 @@ def test_system_prompt_uses_contextual_continuation_policy(tmp_path):
     assert "avoid repeating successful tool calls" in prompt
 
 
-def test_runtime_tools_include_workspace_checkpointing(tmp_path):
+def test_runtime_tools_hide_artifact_read_until_recovery_is_needed(tmp_path):
     settings = make_settings(tmp_path)
     registry = FileRegistry(settings.registry_dir)
     registry.reload()
@@ -310,8 +324,12 @@ def test_runtime_tools_include_workspace_checkpointing(tmp_path):
     names = [tool["function"]["name"] for tool in tools]
 
     assert "list_artifacts" in names
-    assert "read_artifact" in names
+    assert "read_artifact" not in names
     assert "create_checkpoint" in names
+
+    recovery_tools = runtime._runtime_tools([], include_skill_activation=False, include_artifact_read=True)
+    recovery_names = [tool["function"]["name"] for tool in recovery_tools]
+    assert "read_artifact" in recovery_names
 
 
 def test_conversation_id_reuses_workspace_from_artifact_metadata_after_restart(tmp_path):
@@ -490,6 +508,425 @@ def test_chat_injects_attachment_context_as_separate_message(tmp_path):
     assert "CREATE TABLE machine" in attachment_context
 
 
+def test_context_budget_uses_real_prompt_usage_to_calibrate_next_estimate(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    conversation = runtime._get_or_create_conversation(ChatRequest(message="hello"))
+
+    runtime._record_model_usage(
+        conversation,
+        {"prompt_tokens": 2000, "completion_tokens": 120},
+        raw_estimated_prompt_tokens=1000,
+        update_context_calibration=True,
+    )
+    budget = runtime._context_budget(
+        [{"role": "user", "content": "x" * 4000}],
+        [],
+        conversation,
+    )
+
+    assert conversation.cumulative_prompt_tokens == 2000
+    assert conversation.cumulative_completion_tokens == 120
+    assert conversation.last_prompt_tokens == 2000
+    assert conversation.token_estimate_ratio == 2.0
+    assert budget["estimated_prompt_tokens"] == budget["raw_estimated_prompt_tokens"] * 2
+
+
+def test_memory_store_applies_stable_key_delta_and_renders_markdown(tmp_path):
+    store = MemoryStore(tmp_path / "artifacts")
+    created = store.ensure("ws_memory")
+
+    assert created.revision == 0
+    assert store.path("ws_memory").is_file()
+
+    first = store.apply_delta(
+        "ws_memory",
+        {
+            "upserts": [
+                {
+                    "key": "analysis.target",
+                    "section": "confirmed_facts",
+                    "content": "分析对象为 1 号转炉",
+                    "use_when": "后续分析该转炉时使用",
+                    "source": "user",
+                    "confidence": "confirmed",
+                }
+            ],
+            "removes": [],
+        },
+    )
+    same = store.apply_delta(
+        "ws_memory",
+        {
+            "upserts": [
+                {
+                    "key": "analysis.target",
+                    "section": "confirmed_facts",
+                    "content": "分析对象为 1 号转炉",
+                    "use_when": "后续分析该转炉时使用",
+                    "source": "user",
+                    "confidence": "confirmed",
+                }
+            ],
+            "removes": [],
+        },
+    )
+    removed = store.apply_delta("ws_memory", {"upserts": [], "removes": ["analysis.target"]})
+
+    assert first.revision == 1
+    assert same.revision == 1
+    assert removed.revision == 2
+    assert "analysis.target" not in removed.entries
+    markdown = store.path("ws_memory").read_text(encoding="utf-8")
+    assert "# Workspace Resume Memory" in markdown
+    assert "## Confirmed Facts" in markdown
+
+
+def test_memory_jobs_are_persisted_and_failed_jobs_can_be_retried(tmp_path):
+    store = MemoryStore(tmp_path / "artifacts")
+    job = store.enqueue_job(
+        "ws_jobs",
+        conversation_id="conv_jobs",
+        run_id="run_jobs",
+        model="cheap-model",
+        payload={"current_user_questions": ["继续分析什么？"]},
+    )
+
+    reloaded = MemoryStore(tmp_path / "artifacts")
+    assert reloaded.pending_jobs("ws_jobs")[0]["job_id"] == job["job_id"]
+
+    reloaded.update_job("ws_jobs", job["job_id"], status="failed", attempts=3, last_error="timeout")
+    assert reloaded.retry_failed_jobs("ws_jobs") == 1
+    retried = reloaded.pending_jobs("ws_jobs")[0]
+    assert retried["status"] == "pending"
+    assert retried["attempts"] == 0
+
+
+def test_new_conversation_loads_workspace_memory_and_queues_background_delta(tmp_path):
+    settings = make_settings(tmp_path)
+    settings = AgentRuntimeSettings(
+        **{**settings.__dict__, "memory_enabled": True, "memory_model": "test-memory-model"}
+    )
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.memory.apply_delta(
+        "ws_memory",
+        {
+            "upserts": [
+                {
+                    "key": "output.language",
+                    "section": "user_preferences",
+                    "content": "输出使用中文",
+                    "use_when": "生成任何用户可见内容时使用",
+                    "source": "user",
+                    "confidence": "confirmed",
+                }
+            ],
+            "removes": [],
+        },
+    )
+    runtime.openai = SequentialTextOpenAI(
+        [
+            ("已按中文输出。", {"prompt_tokens": 300, "completion_tokens": 10}),
+            (
+                json.dumps(
+                    {
+                        "upserts": [
+                            {
+                                "key": "analysis.target",
+                                "section": "confirmed_facts",
+                                "content": "分析对象为 1 号转炉",
+                                "use_when": "继续分析目标设备时使用",
+                                "source": "user",
+                                "confidence": "confirmed",
+                                "artifact_ids": [],
+                            }
+                        ],
+                        "removes": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                {"prompt_tokens": 180, "completion_tokens": 40},
+            ),
+        ]
+    )
+
+    async def run_chat_and_memory():
+        response = await runtime.chat(
+            ChatRequest(
+                message="分析对象是 1 号转炉",
+                workspace_id="ws_memory",
+                conversation_id="conv_memory",
+            )
+        )
+        planning_calls = len(runtime.openai.chat.completions.calls)
+        await runtime.wait_for_memory_updates("ws_memory")
+        return response, planning_calls
+
+    response, calls_before_wait = asyncio.run(run_chat_and_memory())
+
+    assert response.message == "已按中文输出。"
+    conversation = runtime.conversations["conv_memory"]
+    assert conversation.memory_loaded is True
+    assert "输出使用中文" in (conversation.memory_context or "")
+    document = runtime.memory.load("ws_memory")
+    assert document.entries["workspace.primary_objective"].content == "分析对象是 1 号转炉"
+    assert document.entries["workspace.current_focus"].content == "分析对象是 1 号转炉"
+    assert "workspace.current_request" not in document.entries
+    assert document.entries["analysis.target"].content == "分析对象为 1 号转炉"
+    assert any(step.label == "memory_update" and step.status == "queued" for step in response.steps)
+    assert calls_before_wait == 1
+    planning_messages = runtime.openai.chat.completions.calls[0]["messages"]
+    assert any("Workspace resume memory for the model" in message.get("content", "") for message in planning_messages)
+    memory_payload = json.loads(runtime.openai.chat.completions.calls[1]["messages"][1]["content"])
+    assert runtime.openai.chat.completions.calls[1]["model"] == "test-memory-model"
+    assert "existing_memory_key_index" in memory_payload
+    assert "relevant_existing_memory" in memory_payload
+    assert "# Workspace Memory" not in runtime.openai.chat.completions.calls[1]["messages"][1]["content"]
+
+
+def test_memory_model_defaults_to_main_model(tmp_path):
+    settings = make_settings(tmp_path)
+    settings = AgentRuntimeSettings(**{**settings.__dict__, "memory_enabled": True})
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.openai = SequentialTextOpenAI(
+        [
+            ("完成。", {"prompt_tokens": 20, "completion_tokens": 2}),
+            ('{"upserts":[],"removes":[]}', {"prompt_tokens": 10, "completion_tokens": 2}),
+        ]
+    )
+
+    async def run_chat_and_memory():
+        await runtime.chat(ChatRequest(message="记录这个回合"))
+        await runtime.wait_for_memory_updates()
+
+    asyncio.run(run_chat_and_memory())
+
+    assert runtime.openai.chat.completions.calls[1]["model"] == "test-model"
+
+
+def test_memory_delta_rejects_protected_questions_and_entries_without_usage():
+    delta = AgentRuntime._parse_memory_delta(
+        json.dumps(
+            {
+                "upserts": [
+                    {
+                        "key": "workspace.current_request",
+                        "section": "workspace_goal",
+                        "content": "模型擅自改写的问题",
+                        "use_when": "always",
+                    },
+                    {
+                        "key": "findings.one_off_stats",
+                        "section": "confirmed_facts",
+                        "content": "某次查询共有 11107 条",
+                    },
+                    {
+                        "key": "findings.tool_stats",
+                        "section": "confirmed_facts",
+                        "content": "某次工具查询共有 11107 条",
+                        "use_when": "撰写报告时使用",
+                        "source": "tool",
+                        "artifact_ids": ["art_0018_query"],
+                    },
+                    {
+                        "key": "workflow.next_step",
+                        "section": "open_items",
+                        "content": "等待用户确认分析口径",
+                        "use_when": "恢复该分析任务时先检查用户是否已确认口径",
+                    },
+                    {
+                        "key": "decisions.tool_failure",
+                        "section": "decisions",
+                        "content": "联网工具失败，因此以后都不联网",
+                        "use_when": "后续分析时使用",
+                        "source": "runtime",
+                        "confidence": "confirmed",
+                        "artifact_ids": ["art_0047_web"],
+                    },
+                ],
+                "removes": ["workspace.primary_objective"],
+            },
+            ensure_ascii=False,
+        )
+    )
+
+    assert [item["key"] for item in delta["upserts"]] == ["findings.tool_stats", "workflow.next_step"]
+    assert delta["upserts"][0]["confidence"] == "verified"
+    assert delta["removes"] == []
+
+
+def test_memory_artifact_evidence_includes_checkpoint_payload(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    checkpoint = runtime.artifacts.write_checkpoint(
+        workspace_id="ws_evidence",
+        conversation_id="conv_evidence",
+        run_id="run_evidence",
+        title="案件基础盘",
+        summary="案件数据基础情况已核验",
+        payload={"record_count": 11107, "enterprise_count": 2438},
+    )
+
+    evidence = runtime._memory_artifact_evidence("ws_evidence", "run_evidence")
+
+    assert evidence[0]["artifact_id"] == checkpoint.artifact_id
+    assert evidence[0]["checkpoint_content"]["payload"]["record_count"] == 11107
+
+
+def test_memory_context_excludes_legacy_non_user_decision_but_keeps_verified_baseline(tmp_path):
+    store = MemoryStore(tmp_path / "artifacts")
+    document = store.apply_delta(
+        "ws_semantics",
+        {
+            "upserts": [
+                {
+                    "key": "decisions.failed_tool",
+                    "section": "decisions",
+                    "content": "联网工具失败，因此以后都不联网",
+                    "use_when": "后续分析时使用",
+                    "source": "runtime",
+                    "confidence": "confirmed",
+                    "artifact_ids": ["art_failed"],
+                },
+                {
+                    "key": "case.baseline.coverage",
+                    "section": "confirmed_facts",
+                    "content": "共11107条记录，覆盖2438家企业",
+                    "use_when": "定义案件分析总体范围时使用",
+                    "source": "tool",
+                    "confidence": "verified",
+                    "artifact_ids": ["art_checkpoint"],
+                },
+            ],
+            "removes": [],
+        },
+    )
+
+    context = store.build_context(document)
+
+    assert "11107条记录" in context
+    assert "以后都不联网" not in context
+
+
+def test_chat_compacts_old_history_before_next_model_call(tmp_path):
+    settings = make_settings(tmp_path)
+    settings = AgentRuntimeSettings(
+        **{
+            **settings.__dict__,
+            "model_context_tokens": 5000,
+            "context_compaction_threshold": 0.8,
+        }
+    )
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    request = ChatRequest(message="继续完成当前分析", conversation_id="conv_compact")
+    conversation = runtime._get_or_create_conversation(request)
+    conversation.messages.extend(
+        [
+            {"role": "user", "content": "旧需求：" + "A" * 8000},
+            {"role": "assistant", "content": "旧结论：" + "B" * 8000},
+        ]
+    )
+    runtime.openai = SequentialTextOpenAI(
+        [
+            ("# Resume\n- 用户正在做炼钢效率分析。", {"prompt_tokens": 820, "completion_tokens": 30}),
+            ("已继续分析。", {"prompt_tokens": 420, "completion_tokens": 12}),
+        ]
+    )
+
+    response = asyncio.run(runtime.chat(request))
+
+    assert response.message == "已继续分析。"
+    assert conversation.context_summary.startswith("# Resume")
+    assert conversation.messages == [
+        {"role": "user", "content": "继续完成当前分析"},
+        {"role": "assistant", "content": "已继续分析。"},
+    ]
+    assert conversation.cumulative_prompt_tokens == 1240
+    assert conversation.cumulative_completion_tokens == 42
+    assert any(step.label == "context_compaction" and step.status == "completed" for step in response.steps)
+    final_messages = runtime.openai.chat.completions.calls[-1]["messages"]
+    assert any(message["role"] == "system" and "Compacted conversation context" in message["content"] for message in final_messages)
+    assert any(message["role"] == "user" and message["content"] == "继续完成当前分析" for message in final_messages)
+    assert all("旧需求" not in str(message.get("content")) for message in final_messages)
+
+
+def test_context_compaction_defers_memory_flush_until_turn_end(tmp_path):
+    settings = make_settings(tmp_path)
+    settings = AgentRuntimeSettings(
+        **{
+            **settings.__dict__,
+            "model_context_tokens": 5000,
+            "context_compaction_threshold": 0.8,
+            "memory_enabled": True,
+        }
+    )
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    request = ChatRequest(message="继续分析", workspace_id="ws_compact_memory", conversation_id="conv_compact_memory")
+    conversation = runtime._get_or_create_conversation(request)
+    conversation.messages.extend(
+        [
+            {"role": "user", "content": "旧目标：" + "A" * 8000},
+            {"role": "assistant", "content": "旧进度：" + "B" * 8000},
+        ]
+    )
+    runtime.openai = SequentialTextOpenAI(
+        [
+            ("# Resume\n- 正在分析炼钢效率。", {"prompt_tokens": 800, "completion_tokens": 30}),
+            ("分析已继续。", {"prompt_tokens": 400, "completion_tokens": 12}),
+            (
+                json.dumps(
+                    {
+                        "upserts": [
+                            {
+                                "key": "analysis.state",
+                                "section": "current_state",
+                                "content": "正在分析炼钢效率",
+                                "use_when": "恢复尚未完成的效率分析时使用",
+                                "source": "runtime",
+                                "confidence": "working",
+                                "artifact_ids": [],
+                            }
+                        ],
+                        "removes": [],
+                    },
+                    ensure_ascii=False,
+                ),
+                {"prompt_tokens": 240, "completion_tokens": 45},
+            ),
+        ]
+    )
+
+    async def run_chat_and_memory():
+        response = await runtime.chat(request)
+        calls_before_wait = len(runtime.openai.chat.completions.calls)
+        await runtime.wait_for_memory_updates("ws_compact_memory")
+        return response, calls_before_wait
+
+    response, calls_before_wait = asyncio.run(run_chat_and_memory())
+
+    assert len(runtime.openai.chat.completions.calls) == 3
+    assert calls_before_wait == 2
+    assert conversation.memory_dirty is False
+    assert runtime.memory.load("ws_compact_memory").entries["analysis.state"].content == "正在分析炼钢效率"
+    queued_updates = [step for step in response.steps if step.label == "memory_update" and step.status == "queued"]
+    assert len(queued_updates) == 1
+    memory_payload = json.loads(runtime.openai.chat.completions.calls[2]["messages"][1]["content"])
+    assert memory_payload["context_was_compacted"] is True
+    assert "正在分析炼钢效率" in memory_payload["compacted_context_summary"]
+
+
 def test_streaming_final_answer_emits_token_deltas(tmp_path):
     settings = make_settings(tmp_path)
     registry = FileRegistry(settings.registry_dir)
@@ -554,6 +991,24 @@ def test_frontend_entrypoint_serves_static_page():
     assert response.status_code == 200
     assert "对话入口" in response.text
     assert "echarts.min.js" in response.text
+
+
+def test_workspace_memory_api_returns_read_only_markdown(tmp_path, monkeypatch):
+    import importlib
+
+    app_module = importlib.import_module("agent_runtime.app")
+    monkeypatch.setattr(app_module.runtime, "memory", MemoryStore(tmp_path / "artifacts"))
+    client = TestClient(app)
+
+    response = client.get("/workspaces/ws_api_memory_test/memory")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["workspace_id"] == "ws_api_memory_test"
+    assert payload["revision"] >= 0
+    assert payload["markdown"].startswith("# Workspace Resume Memory")
+    assert "model_context" in payload
+    assert payload["job_counts"] == {}
 
 
 def test_builtin_research_skills_are_registered():
@@ -769,6 +1224,46 @@ def test_artifact_store_writes_manifest_timeline_and_content(tmp_path):
     assert "Recent Successful Evidence" in context
     assert "Recent Workspace Timeline" in context
     assert (tmp_path / "artifacts" / "workspaces" / "ws_test" / "timeline.jsonl").is_file()
+
+
+def test_runtime_rejects_repeated_artifact_read_in_same_run(tmp_path):
+    settings = make_settings(tmp_path)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    record = runtime.artifacts.write_tool_artifact(
+        workspace_id="ws_repeat_read",
+        conversation_id="conv_repeat_read",
+        run_id="run_prior",
+        tool_name="web-search",
+        tool_call_id="call_prior",
+        kind="sandbox_execution",
+        arguments={"query": "steel"},
+        result={"success": True, "data": {"summary": "prior evidence"}},
+    )
+    runtime.openai = FakeOpenAI(
+        tool_name="read_artifact",
+        arguments={"artifact_id": record.artifact_id},
+    )
+
+    response = asyncio.run(
+        runtime.chat(
+            ChatRequest(
+                message="继续之前的分析",
+                workspace_id="ws_repeat_read",
+                conversation_id="conv_repeat_read",
+            )
+        )
+    )
+
+    reads = [trace for trace in response.tool_calls if trace.tool_name == "read_artifact"]
+    assert len(reads) == 2
+    assert reads[0].result["success"] is True
+    assert reads[1].result == {
+        "success": False,
+        "error": "Artifact already read in this run; reuse the previous observation.",
+        "artifact_id": record.artifact_id,
+    }
 
 
 def test_artifact_store_writes_model_trace(tmp_path):
@@ -1064,6 +1559,18 @@ def test_artifact_observation_uses_effective_success_and_page_excerpt():
     assert "event_source" in profile_observation["schema_overview"]
 
 
+def test_artifact_observation_marks_omitted_preview_content_as_truncated():
+    observation = AgentRuntime._build_artifact_observation(
+        "table-query",
+        {"success": True, "data": {"rows": [{"id": index} for index in range(6)]}},
+        {"artifact_id": "art_0001_table-query", "summary": "six rows"},
+    )
+
+    assert observation["row_count"] == 6
+    assert len(observation["rows_preview"]) == 5
+    assert observation["truncated"] is True
+
+
 class FakeOpenAI:
     def __init__(self, *, tool_name: str, arguments: dict):
         self.chat = FakeChat(tool_name=tool_name, arguments=arguments)
@@ -1079,6 +1586,11 @@ class CapturingFinalAnswerOpenAI:
         self.chat = CapturingFinalAnswerChat(content)
 
 
+class SequentialTextOpenAI:
+    def __init__(self, responses: list[tuple[str, dict]]):
+        self.chat = SequentialTextChat(responses)
+
+
 class FakeChat:
     def __init__(self, *, tool_name: str, arguments: dict):
         self.completions = FakeCompletions(tool_name=tool_name, arguments=arguments)
@@ -1087,6 +1599,11 @@ class FakeChat:
 class CapturingFinalAnswerChat:
     def __init__(self, content: str):
         self.completions = CapturingFinalAnswerCompletions(content)
+
+
+class SequentialTextChat:
+    def __init__(self, responses: list[tuple[str, dict]]):
+        self.completions = SequentialTextCompletions(responses)
 
 
 class FakeStreamingChat:
@@ -1120,6 +1637,17 @@ class CapturingFinalAnswerCompletions:
     async def create(self, **kwargs):
         self.last_kwargs = kwargs
         return FakeTextCompletion(self.content)
+
+
+class SequentialTextCompletions:
+    def __init__(self, responses: list[tuple[str, dict]]):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        content, usage = self.responses.pop(0)
+        return FakeTextCompletion(content, usage=usage)
 
 
 class RecordingRunner:
@@ -1192,8 +1720,9 @@ class FakeCompletion:
 
 
 class FakeTextCompletion:
-    def __init__(self, content: str):
+    def __init__(self, content: str, usage: dict | None = None):
         self.choices = [FakeTextChoice(content)]
+        self.usage = usage
 
 
 class FakeChoice:

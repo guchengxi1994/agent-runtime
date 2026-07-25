@@ -39,7 +39,6 @@ class ArtifactRecord:
             "artifact_path": self.relative_path,
             "artifact_kind": self.kind,
             "summary": self.summary,
-            "read_hint": "Call read_artifact with workspace_id and artifact_id if full details are needed.",
         }
 
 
@@ -206,6 +205,14 @@ class ArtifactStore:
             "artifacts": filtered[-limit:],
         }
 
+    def has_recoverable_artifacts(self, workspace_id: str) -> bool:
+        workspace_id = sanitize_id(workspace_id)
+        self._refresh_workspace_manifest(workspace_id)
+        return any(
+            item.get("kind") in {"checkpoint", "sandbox_execution"}
+            for item in self._read_workspace_manifest(workspace_id)
+        )
+
     def read_artifact(
         self,
         *,
@@ -251,8 +258,8 @@ class ArtifactStore:
             content = content[-MAX_CONTEXT_CHARS:]
         prefix = (
             "Workspace resume context for the current request. "
-            "Use list_artifacts/read_artifact when exact details are needed; "
-            "do not assume all artifact content is already in the prompt."
+            "The index summaries are sufficient unless exact fields or raw evidence from an older artifact are required. "
+            "Do not read artifacts merely to verify or restate a summary."
         )
         if conversation_id:
             prefix += f" Current conversation_id={conversation_id}."
@@ -441,8 +448,9 @@ class ArtifactStore:
                 "- Prefer checkpoint artifacts when resuming longer workflows.",
                 "- Use successful evidence artifacts as usable observations, not just the latest tool status.",
                 "- Distinguish partial failures or empty attempts from overall tool failure.",
-                "- Call `read_artifact` with workspace_id and artifact_id when exact tool output is needed.",
-                "- Call `list_artifacts` when deciding which stored observation or checkpoint to inspect.",
+                "- Read an artifact only when an older checkpoint must be resumed or exact omitted fields/raw evidence are required.",
+                "- Do not read an artifact merely to verify or restate a successful observation.",
+                "- List artifacts only when the compact index does not identify the stored item needed for recovery.",
             ]
         )
         (self._workspace_root(workspace_id) / "working_state.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
