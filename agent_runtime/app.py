@@ -22,7 +22,8 @@ from .file_ingest import (
     parse_uploaded_files,
 )
 from .logging_utils import setup_logging
-from .models import AgentDefinition, ChatRequest, ChatResponse, SkillPackage, UserContext
+from .models import AgentDefinition, ChatRequest, ChatResponse, SkillPackage, SkillSummary, UserContext
+from .mcp import builtin_mcp_skill
 from .models import RuntimeStepTrace
 from .registry import FileRegistry, RegistryError
 
@@ -94,10 +95,12 @@ async def health() -> dict[str, object]:
         "registry_dir": str(settings.registry_dir),
         "artifacts_dir": str(settings.artifacts_dir),
         "sandbox_url": settings.sandbox_url,
+        "mcp_gateway_url": settings.mcp_gateway_url,
         "admin_auth_enabled": settings.admin_auth_enabled,
         "agents": len(registry.agents) or 1,
         "skills": len(registry.skills),
         "executable_skills": sum(1 for skill in registry.skills.values() if skill.executable),
+        "mcp_servers": len(registry.mcp_servers),
         "conversations": len(runtime.conversations),
         "executions": len(runtime.executions),
     }
@@ -109,7 +112,12 @@ async def reload_registry(_: Annotated[None, Depends(require_admin)]) -> dict[st
         registry.reload()
     except RegistryError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"success": True, "agents": len(registry.agents) or 1, "skills": len(registry.skills)}
+    return {
+        "success": True,
+        "agents": len(registry.agents) or 1,
+        "skills": len(registry.skills),
+        "mcp_servers": len(registry.mcp_servers),
+    }
 
 
 @app.post("/admin/agents")
@@ -137,7 +145,25 @@ async def list_agents() -> dict[str, object]:
 
 @app.get("/skills")
 async def list_skills() -> dict[str, object]:
-    return {"skills": [skill.model_dump() for skill in registry.skill_summaries(UserContext())]}
+    user = UserContext()
+    skills = registry.skill_summaries(user)
+    servers = registry.accessible_mcp_servers(user)
+    if servers:
+        builtin = builtin_mcp_skill(servers)
+        skills.append(
+            SkillSummary(
+                name=builtin.name,
+                description=builtin.description,
+                enabled=True,
+                executable=False,
+            )
+        )
+    return {"skills": [skill.model_dump() for skill in skills]}
+
+
+@app.get("/mcp-servers")
+async def list_mcp_servers() -> dict[str, object]:
+    return {"servers": [server.model_dump() for server in registry.mcp_server_summaries(UserContext())]}
 
 
 @app.get("/executions")

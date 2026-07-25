@@ -23,6 +23,7 @@ services:
       - .env
     environment:
       AGENT_RUNTIME_SANDBOX_URL: http://sandbox:8001
+      AGENT_RUNTIME_MCP_GATEWAY_URL: http://mcp-gateway:8002
       AGENT_RUNTIME_REGISTRY_DIR: /app/registry
       AGENT_RUNTIME_ARTIFACTS_DIR: /app/artifacts
     ports:
@@ -33,6 +34,21 @@ services:
       - ./artifacts:/app/artifacts
     depends_on:
       - sandbox
+      - mcp-gateway
+
+  mcp-gateway:
+    build:
+      context: .
+      dockerfile: mcp_gateway/Dockerfile
+    env_file:
+      - .env
+    environment:
+      MCP_GATEWAY_PORT: "8002"
+    volumes:
+      - ./mcp_gateway:/app/mcp_gateway
+      - ./mcp_server:/app/mcp_server
+    expose:
+      - "8002"
 
   sandbox:
     build:

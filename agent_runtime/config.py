@@ -110,6 +110,7 @@ class AgentRuntimeSettings:
     memory_context_tokens: int
     memory_max_entries: int
     request_timeout_seconds: float
+    mcp_gateway_url: str = "http://127.0.0.1:8002"
     env_file_loaded: str | None = None
     openai_api_key_source: str = "unset"
     openai_base_url_source: str = "unset"
@@ -121,6 +122,7 @@ class AgentRuntimeSettings:
     def ensure_directories(self) -> None:
         (self.registry_dir / "skills").mkdir(parents=True, exist_ok=True)
         (self.registry_dir / "agents").mkdir(parents=True, exist_ok=True)
+        (self.registry_dir / "mcp_servers").mkdir(parents=True, exist_ok=True)
         self.artifacts_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -140,6 +142,7 @@ def load_settings() -> AgentRuntimeSettings:
         registry_dir=registry_dir,
         artifacts_dir=artifacts_dir,
         sandbox_url=env("AGENT_RUNTIME_SANDBOX_URL", "http://127.0.0.1:8001"),
+        mcp_gateway_url=env("AGENT_RUNTIME_MCP_GATEWAY_URL", "http://127.0.0.1:8002"),
         admin_token=os.getenv("AGENT_RUNTIME_ADMIN_TOKEN") or None,
         max_runtime_rounds=int(env("AGENT_RUNTIME_MAX_RUNTIME_ROUNDS", "6")),
         model_context_tokens=int(env("AGENT_RUNTIME_MODEL_CONTEXT_TOKENS", "131072")),

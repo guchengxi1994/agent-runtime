@@ -8,6 +8,8 @@ from pydantic import ValidationError
 from .models import (
     AgentDefinition,
     AgentSummary,
+    McpServerDefinition,
+    McpServerSummary,
     PermissionPolicy,
     SkillDefinition,
     SkillPackage,
@@ -27,12 +29,15 @@ class FileRegistry:
         self.root = root
         self.skills_dir = root / "skills"
         self.agents_dir = root / "agents"
+        self.mcp_servers_dir = root / "mcp_servers"
         self.agents: dict[str, AgentDefinition] = {}
         self.skills: dict[str, SkillDefinition] = {}
+        self.mcp_servers: dict[str, McpServerDefinition] = {}
 
     def reload(self) -> None:
         self.agents = self._load_agents()
         self.skills = self._load_skills()
+        self.mcp_servers = self._load_mcp_servers()
 
     def _load_agents(self) -> dict[str, AgentDefinition]:
         agents: dict[str, AgentDefinition] = {}
@@ -49,10 +54,28 @@ class FileRegistry:
         skills: dict[str, SkillDefinition] = {}
         for path in sorted(item for item in self.skills_dir.iterdir() if item.is_dir()):
             skill = self._load_skill_package(path)
+            if skill.name == "mcp":
+                raise RegistryError("Skill name `mcp` is reserved for the built-in MCP harness")
             if skill.name in skills:
                 raise RegistryError(f"Duplicate skill name: {skill.name}")
             skills[skill.name] = skill
         return skills
+
+    def _load_mcp_servers(self) -> dict[str, McpServerDefinition]:
+        servers: dict[str, McpServerDefinition] = {}
+        if not self.mcp_servers_dir.exists():
+            return servers
+        paths = sorted([*self.mcp_servers_dir.glob("*.yaml"), *self.mcp_servers_dir.glob("*.yml")])
+        for path in paths:
+            try:
+                raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+                server = McpServerDefinition.model_validate(raw)
+            except (OSError, yaml.YAMLError, ValidationError) as exc:
+                raise RegistryError(f"Invalid MCP server config {path}: {exc}") from exc
+            if server.id in servers:
+                raise RegistryError(f"Duplicate MCP server id: {server.id}")
+            servers[server.id] = server
+        return servers
 
     def _load_skill_package(self, skill_dir: Path) -> SkillDefinition:
         instructions_path = skill_dir / "SKILL.md"
@@ -86,6 +109,7 @@ class FileRegistry:
                     "capability_hints": normalize_string_list(
                         runtime_meta.get("capabilities") or runtime_meta.get("capability_hints")
                     ),
+                    "mcp_dependencies": runtime_meta.get("mcp_dependencies") or [],
                     "executable": normalize_bool(runtime_meta.get("executable"), False),
                     "parameters_schema": normalize_object(
                         runtime_meta.get("parameters_schema") or runtime_meta.get("parameters"),
@@ -143,9 +167,25 @@ class FileRegistry:
                 description=agent.description,
                 enabled=agent.enabled,
                 skill_ids=agent.skill_ids,
+                mcp_server_ids=agent.mcp_server_ids,
                 capability_hints=agent.capability_hints,
             )
             for agent in self.accessible_agents(user)
+        ]
+
+    def accessible_mcp_servers(self, user: UserContext) -> list[McpServerDefinition]:
+        return [server for server in self.mcp_servers.values() if server.enabled and is_allowed(server.permissions, user)]
+
+    def mcp_server_summaries(self, user: UserContext) -> list[McpServerSummary]:
+        return [
+            McpServerSummary(
+                id=server.id,
+                description=server.description,
+                enabled=server.enabled,
+                transport=server.transport,
+                tool_allowlist=server.tool_allowlist,
+            )
+            for server in self.accessible_mcp_servers(user)
         ]
 
     def skill_summaries(self, user: UserContext) -> list[SkillSummary]:

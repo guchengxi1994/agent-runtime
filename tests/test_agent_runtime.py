@@ -286,11 +286,13 @@ def test_activate_skill_returns_full_harness_without_backend_parsing(tmp_path):
     available = runtime._available_skills(request)
     activated = runtime._explicit_or_active_skills(request, conversation, available)
 
-    result = runtime._activate_skill(
-        {"skill_name": "demo-skill"},
-        available,
-        activated,
-        conversation,
+    result, _ = asyncio.run(
+        runtime._activate_skill(
+            {"skill_name": "demo-skill"},
+            available,
+            activated,
+            conversation,
+        )
     )
 
     assert result["success"] is True

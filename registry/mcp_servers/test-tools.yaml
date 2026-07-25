@@ -1,0 +1,12 @@
+id: test-tools
+description: Deterministic local MCP tools for arithmetic and text transformations.
+transport: stdio
+command: python
+args:
+  - mcp_server/server.py
+tool_allowlist:
+  - add
+  - echo
+  - reverse_text
+  - server_info
+timeout_ms: 30000

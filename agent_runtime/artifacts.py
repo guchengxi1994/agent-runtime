@@ -209,7 +209,7 @@ class ArtifactStore:
         workspace_id = sanitize_id(workspace_id)
         self._refresh_workspace_manifest(workspace_id)
         return any(
-            item.get("kind") in {"checkpoint", "sandbox_execution"}
+            item.get("kind") in {"checkpoint", "sandbox_execution", "mcp_execution"}
             for item in self._read_workspace_manifest(workspace_id)
         )
 

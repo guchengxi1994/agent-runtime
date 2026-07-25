@@ -7,6 +7,7 @@
 - `Skill = harness and/or executable capability`。不再维护单独的 `registry/tools`。
 - Harness skill 是 `SKILL.md` 里的流程、约束、领域知识和规划提示，模型通过 `activate_skill` 按需加载全文。
 - Executable skill 是带 `metadata.agent_runtime.executable=true` 的 skill 包，包含 `parameters_schema`、`execution_policy`、`required_secrets` 和 Python `entrypoint`。
+- MCP 是一等执行能力：`registry/mcp_servers/*.yaml` 定义受控 server，内置 `mcp` harness 按需激活 server，再将发现到的远端工具作为带原始 JSON Schema 的 function 暴露给模型。
 - OpenAI 接口层仍使用 function tool call 机制，但可调用对象来自 executable skill，而不是独立 tool registry。
 - `agent_runtime` 不创建 venv、不安装依赖、不执行脚本；它只把已授权 skill 的脚本、参数和执行策略发给 `sandbox /skills/execute`。
 - `sandbox` 是 compose 内部服务，负责 venv 缓存、依赖安装、超时、stdout/stderr 限制和执行结果。
@@ -35,6 +36,7 @@ docker compose up --build
 
 - `agent-runtime`: 暴露 `http://127.0.0.1:8010`
 - `sandbox`: 只在 compose 网络内暴露 `http://sandbox:8001`
+- `mcp-gateway`: 只在 compose 网络内暴露 `http://mcp-gateway:8002`，负责 stdio/Streamable HTTP MCP 会话和 `env:` 密钥解析
 - `registry`: 通过 volume 挂载到主 runtime
 - `sandbox-runtime`: sandbox 的 venv、pip cache 和临时执行目录 volume
 
@@ -65,6 +67,15 @@ python -m agent_runtime
 ```
 
 浏览器打开 `http://127.0.0.1:8010/` 可以使用内置调试前端。
+
+本地 MCP gateway：
+
+```bash
+pip install -r mcp_gateway/requirements.txt
+python -m uvicorn mcp_gateway.app:app --host 127.0.0.1 --port 8002
+```
+
+仓库自带 `registry/mcp_servers/test-tools.yaml` 和 `mcp_server/server.py`。对话中先激活内置 `mcp` skill，再激活 `test-tools`，随后可调用 `add`、`echo`、`reverse_text`、`server_info` 四个测试工具。gateway 会按需启动该 stdio server。
 
 ## Executable Skill
 
@@ -108,6 +119,56 @@ Use this executable skill for deterministic arithmetic. Do not invent missing nu
 ```
 
 `skill.py` 必须定义 `definition` 和 `execute(params)`。依赖包写在 `execution_policy.packages`；API token/header 等 secret 只声明在 `required_secrets`，由 sandbox 从自身环境变量解析并注入进程环境。
+
+## MCP
+
+MCP server 的连接定义由 operator 放在 `registry/mcp_servers/*.yaml`，不是模型参数，也不会从用户消息读取。内置 `mcp` harness 激活后，模型只能选择该 skill 中列出的 server；调用 `activate_mcp_server` 后，gateway 的 `tools/list` 结果会被转换为带原始 JSON Schema 的 function。随后远程工具像 executable skill 一样进入模型工具集，但执行走 `mcp-gateway`，不经过 sandbox。
+
+对于确定会使用某个原子 MCP tool 的 harness skill，推荐在 frontmatter 声明依赖，而不是在正文要求模型先手工发现 server：
+
+```yaml
+metadata:
+  agent_runtime:
+    mcp_dependencies:
+      - alias: search_cases
+        server_id: case-retrieval
+        tool_name: search_cases
+        required: true
+      - alias: build_chart
+        server_id: chart-service
+        tool_name: build_chart_spec
+        required: false
+```
+
+激活 skill 时，runtime 会检查当前 agent/user 对 server 的权限、发现远端 tool 并验证 allowlist；通过后只将 `search_cases`、`build_chart` 这样的 alias 暴露给模型。required 依赖不可用时，skill 不会被激活。`server_id` 是 runtime 的部署配置标识，`tool_name` 对应 MCP `tools/call` 名称；这份 frontmatter 规范是 agent-runtime 扩展，不是 MCP 协议字段。可参考 `mcp-composition-demo` skill。
+
+仓库中的测试 server 配置：
+
+```yaml
+id: test-tools
+description: Deterministic local MCP tools for arithmetic and text transformations.
+transport: stdio
+command: python
+args:
+  - mcp_server/server.py
+tool_allowlist: [add, echo, reverse_text, server_info]
+timeout_ms: 30000
+```
+
+Streamable HTTP server 也可以配置。`env:` 值由 gateway 在调用时解析；runtime、模型 trace 和 artifact 不会接触解析后的 header 或环境变量值：
+
+```yaml
+id: internal-data
+description: Read-only internal data tools.
+transport: streamable_http
+url: https://mcp.example.internal/mcp
+headers:
+  Authorization: env:INTERNAL_MCP_AUTHORIZATION
+tool_allowlist: [search_records, get_record]
+permissions:
+  scopes: [data:read]
+timeout_ms: 60000
+```
 
 ## Research Skills
 
@@ -155,6 +216,7 @@ metadata:
 - `thinking`: runtime 正在调用模型规划下一步。默认不暴露隐藏推理文本；如果兼容模型返回 `reasoning_content`，且 `AGENT_RUNTIME_EXPOSE_REASONING_CONTENT=true`，才会把它放进 `detail`。
 - `runtime_call`: runtime 内置动作，例如 `activate_skill`、`read_skill_resource` 或权限拒绝。
 - `sandbox_execution`: executable skill 已转发到 sandbox 执行。
+- `mcp_execution`: 已调用 allowlisted MCP server 的远端 tool，包含 server/tool/execution 审计元数据。
 - `waiting_for_user`: 通过 `request_user_input` 暂停，等待用户补充字段。
 - `final`: 生成最终回复或 runtime 达到轮次上限。
 
@@ -170,6 +232,7 @@ metadata:
 
 - `GET /health`: runtime 状态和 executable skill 数量
 - `GET /skills`: 当前用户可见 skill summary
+- `GET /mcp-servers`: 当前用户可见 MCP server summary（不包含 command、URL、header 或 secret）
 - `GET /agents`: 当前用户可见 agent summary
 - `GET /executions`: 最近 sandbox execution metadata
 - `POST /chat`: 对话入口
@@ -195,6 +258,7 @@ metadata:
 | `AGENT_RUNTIME_REASONING_EFFORT` | 空 | 可选，仅在 provider/model 支持时传给 Chat Completions |
 | `AGENT_RUNTIME_EXPOSE_REASONING_CONTENT` | `false` | 是否在 `steps.kind=thinking` 中展示兼容接口返回的 reasoning 文本 |
 | `AGENT_RUNTIME_SANDBOX_URL` | `http://127.0.0.1:8001` | sandbox 地址 |
+| `AGENT_RUNTIME_MCP_GATEWAY_URL` | `http://127.0.0.1:8002` | 内部 MCP gateway 地址 |
 | `AGENT_RUNTIME_REGISTRY_DIR` | `./registry` | skill/agent 文件注册表 |
 | `AGENT_RUNTIME_ADMIN_TOKEN` | 空 | 设置后管理接口要求 Bearer token |
 | `AGENT_RUNTIME_MAX_RUNTIME_ROUNDS` | `6` | 单轮对话最大 runtime 调用轮次 |
