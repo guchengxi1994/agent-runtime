@@ -164,6 +164,30 @@ class SequenceToolCompletions:
         return TextCompletion(self.final_content)
 
 
+class ReplanningToolOpenAI:
+    def __init__(self, tool_name: str, calls: list[dict], final_content: str) -> None:
+        self.chat = ReplanningToolChat(tool_name, calls, final_content)
+
+
+class ReplanningToolChat:
+    def __init__(self, tool_name: str, calls: list[dict], final_content: str) -> None:
+        self.completions = ReplanningToolCompletions(tool_name, calls, final_content)
+
+
+class ReplanningToolCompletions:
+    def __init__(self, tool_name: str, calls: list[dict], final_content: str) -> None:
+        self.tool_name = tool_name
+        self.tool_calls = list(calls)
+        self.final_content = final_content
+        self.requests: list[dict] = []
+
+    async def create(self, **kwargs):
+        self.requests.append(kwargs)
+        if self.tool_calls:
+            return ToolCompletion(self.tool_name, self.tool_calls.pop(0))
+        return TextCompletion(self.final_content)
+
+
 class ToolCompletion:
     def __init__(self, tool_name: str, arguments: dict) -> None:
         self.choices = [ToolChoice(tool_name, arguments)]
@@ -367,6 +391,54 @@ def test_runtime_routes_mcp_tool_to_gateway_and_writes_mcp_artifact(tmp_path):
     assert any(step.kind == "mcp_execution" for step in response.steps)
     assert any(item["kind"] == "mcp_execution" for item in artifacts)
     assert runtime.executions[0]["execution_id"] == "mcp_test_execution"
+
+
+def test_runtime_replans_an_api_parameter_error_without_an_inspection_skill(tmp_path):
+    settings = make_settings(tmp_path)
+    write_test_server(settings)
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    gateway = RecordingMcpGateway()
+    runtime.mcp = gateway
+    request = ChatRequest(message="calculate 2 plus 3", conversation_id="conv_api_replan", workspace_id="ws_api_replan")
+    conversation = runtime._get_or_create_conversation(request)
+    conversation.active_skill_ids = [MCP_HARNESS_NAME]
+    conversation.active_mcp_server_ids = ["test-tools"]
+    function_name = mcp_function_name("test-tools", "add")
+    runtime.openai = ReplanningToolOpenAI(
+        function_name,
+        [{"a": "two", "b": 3}, {"a": 2, "b": 3}],
+        "Corrected the API arguments and got 5.",
+    )
+
+    async def rejecting_call_tool(server, tool_name, arguments, context):
+        gateway.tool_calls.append({"server": server.id, "tool_name": tool_name, "arguments": arguments})
+        if isinstance(arguments.get("a"), str):
+            return {
+                "success": False,
+                "error_type": "invalid_request",
+                "error": "Field a must be a number, not string.",
+                "validation_errors": [{"field": "a", "expected": "number", "actual": "string"}],
+            }
+        return {"success": True, "data": {"content": '{"sum": 5}'}}
+
+    gateway.call_tool = rejecting_call_tool
+    response = asyncio.run(runtime.chat(request))
+
+    assert response.message == "Corrected the API arguments and got 5."
+    assert [call["arguments"] for call in gateway.tool_calls] == [{"a": "two", "b": 3}, {"a": 2, "b": 3}]
+    second_request = runtime.openai.chat.completions.requests[1]
+    replan_context = json.dumps(second_request["messages"], ensure_ascii=False)
+    replan_messages = [
+        str(message.get("content") or "")
+        for message in second_request["messages"]
+        if message.get("role") == "system" and "Runtime replan feedback" in str(message.get("content") or "")
+    ]
+    assert "invalid_request" in replan_context
+    assert "Field a must be a number" in replan_context
+    assert any('"a": {"type": "number"}' in message for message in replan_messages)
+    assert "pg-table-profile" not in replan_context
 
 
 def test_runtime_auto_exposes_declared_mcp_alias_for_an_active_skill(tmp_path):

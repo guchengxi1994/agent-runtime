@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from agent_runtime.artifacts import ArtifactStore
@@ -472,6 +473,96 @@ def test_runtime_executes_bundle_skill_when_extra_resources_exist(tmp_path):
     assert response.message == "runtime 调用轮次超过上限，已停止。请缩小问题范围或提高 AGENT_RUNTIME_MAX_RUNTIME_ROUNDS。"
     assert runtime.runner.calls
     assert runtime.runner.calls[0]["mode"] == "bundle"
+
+
+def test_runtime_replans_from_dynamic_skill_argument_failure(tmp_path):
+    settings = replace(make_settings(tmp_path), max_runtime_rounds=2)
+    write_skill(
+        settings.registry_dir / "skills" / "strict-skill",
+        name="strict-skill",
+        runtime_metadata="""  agent_runtime:
+    executable: true
+    entrypoint: skill.py
+    parameters_schema:
+      type: object
+      properties:
+        filters:
+          type: object
+          additionalProperties: true
+      required:
+        - filters
+      additionalProperties: false
+""",
+    )
+    skill_dir = settings.registry_dir / "skills" / "strict-skill"
+    skill_dir.joinpath("skill.py").write_text(
+        "definition = {'name': 'strict-skill'}\ndef execute(params):\n    return {'success': True}\n",
+        encoding="utf-8",
+    )
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.runner = SchemaRejectingRunner()
+    runtime.openai = DynamicFilterReplanningOpenAI()
+
+    response = asyncio.run(runtime.chat(ChatRequest(message="执行严格 skill")))
+
+    calls = [trace for trace in response.tool_calls if trace.tool_name == "strict-skill"]
+    assert response.message == "已使用支持的 region 字段完成查询。"
+    assert len(runtime.runner.calls) == 2
+    assert len(calls) == 2
+    assert calls[0].result["data"]["error_type"] == "unknown_filter_field"
+    assert calls[1].result["success"] is True
+    assert runtime.runner.calls[1]["arguments"] == {"filters": {"region": "华东"}}
+    replan_messages = [
+        message["content"]
+        for message in runtime.openai.chat.completions.calls[1]["messages"]
+        if message.get("role") == "system"
+    ]
+    assert any("unknown_filter_field" in message for message in replan_messages)
+    assert any("filters.unknown is not supported" in message for message in replan_messages)
+    assert any("allowed_filter_fields" in message for message in replan_messages)
+    assert any("region" in message for message in replan_messages)
+    assert any("Do not repeat this tool with identical arguments" in message for message in replan_messages)
+
+
+def test_runtime_blocks_identical_skill_call_after_execution_failure(tmp_path):
+    settings = make_settings(tmp_path)
+    write_skill(
+        settings.registry_dir / "skills" / "failing-skill",
+        name="failing-skill",
+        runtime_metadata="""  agent_runtime:
+    executable: true
+    entrypoint: skill.py
+    parameters_schema:
+      type: object
+      properties:
+        input_value:
+          type: string
+      required:
+        - input_value
+      additionalProperties: false
+""",
+    )
+    skill_dir = settings.registry_dir / "skills" / "failing-skill"
+    skill_dir.joinpath("skill.py").write_text(
+        "definition = {'name': 'failing-skill'}\ndef execute(params):\n    raise ValueError('input_value is not supported by skill.py')\n",
+        encoding="utf-8",
+    )
+    registry = FileRegistry(settings.registry_dir)
+    registry.reload()
+    runtime = AgentRuntime(settings, registry)
+    runtime.runner = FailingRecordingRunner()
+    runtime.openai = FakeOpenAI(tool_name="failing-skill", arguments={"input_value": "same"})
+
+    response = asyncio.run(runtime.chat(ChatRequest(message="执行失败 skill")))
+
+    calls = [trace for trace in response.tool_calls if trace.tool_name == "failing-skill"]
+    assert len(runtime.runner.calls) == 1
+    assert len(calls) == 2
+    assert calls[0].result["success"] is False
+    assert calls[1].result["error_type"] == "repeated_failed_tool_call"
+    assert "not supported" in calls[1].result["previous_error"]
 
 
 def test_chat_injects_attachment_context_as_separate_message(tmp_path):
@@ -1578,6 +1669,11 @@ class FakeOpenAI:
         self.chat = FakeChat(tool_name=tool_name, arguments=arguments)
 
 
+class DynamicFilterReplanningOpenAI:
+    def __init__(self):
+        self.chat = DynamicFilterReplanningChat()
+
+
 class FakeStreamingOpenAI:
     def __init__(self, chunks: list[dict]):
         self.chat = FakeStreamingChat(chunks)
@@ -1596,6 +1692,11 @@ class SequentialTextOpenAI:
 class FakeChat:
     def __init__(self, *, tool_name: str, arguments: dict):
         self.completions = FakeCompletions(tool_name=tool_name, arguments=arguments)
+
+
+class DynamicFilterReplanningChat:
+    def __init__(self):
+        self.completions = DynamicFilterReplanningCompletions()
 
 
 class CapturingFinalAnswerChat:
@@ -1620,6 +1721,20 @@ class FakeCompletions:
 
     async def create(self, **_kwargs):
         return FakeCompletion(self.tool_name, self.arguments)
+
+
+class DynamicFilterReplanningCompletions:
+    def __init__(self):
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        call_count = len(self.calls)
+        if call_count == 1:
+            return FakeCompletion("strict-skill", {"filters": {"unknown": "value"}})
+        if call_count == 2:
+            return FakeCompletion("strict-skill", {"filters": {"region": "华东"}})
+        return FakeTextCompletion("已使用支持的 region 字段完成查询。")
 
 
 class FakeStreamingCompletions:
@@ -1680,6 +1795,50 @@ class RecordingRunner:
             }
         )
         return {"success": True, "data": {"mode": "bundle"}}
+
+
+class FailingRecordingRunner(RecordingRunner):
+    async def execute_skill(self, skill, arguments, context, script, *, base_policy=None):
+        self.calls.append(
+            {
+                "mode": "inline",
+                "skill": skill.name,
+                "arguments": arguments,
+            }
+        )
+        return {
+            "success": False,
+            "error_type": "skill_parameter_mismatch",
+            "error": "input_value is not supported by skill.py",
+        }
+
+
+class SchemaRejectingRunner(RecordingRunner):
+    async def execute_skill(self, skill, arguments, context, script, *, base_policy=None):
+        self.calls.append(
+            {
+                "mode": "inline",
+                "skill": skill.name,
+                "arguments": arguments,
+            }
+        )
+        if arguments == {"filters": {"region": "华东"}}:
+            return {"success": True, "data": {"rows": [{"region": "华东"}]}}
+        return {
+            "success": True,
+            "error_type": "sandbox_execution_failed",
+            "error": "Skill returned a failed result.",
+            "data": {
+                "success": False,
+                "error_type": "unknown_filter_field",
+                "error": "filters.unknown is not supported; available filter fields are region and industry",
+                "invalid_filters": [{"field": "unknown", "value": "value", "reason": "unknown_column"}],
+                "allowed_filter_fields": ["region", "industry"],
+                "filterable_enums": {"region": ["华东"]},
+                "recommended_next_skill": "pg-table-profile",
+                "retry_guidance": "Choose region or industry, or profile the source before constructing filters.",
+            },
+        }
 
 
 class FakeAsyncStream:

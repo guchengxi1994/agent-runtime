@@ -121,6 +121,9 @@ def execute(params):
                 "sql": sql,
                 "dataset_status": dataset_status,
             }
+        filter_diagnostic = _validate_dynamic_filters(filters)
+        if filter_diagnostic:
+            return filter_diagnostic
         try:
             rows, columns = _execute_sql(sql)
         except Exception as exc:
@@ -241,6 +244,36 @@ def _build_sql(query, tags, filters, sort_by, limit):
     return sql, assumptions
 
 
+def _validate_dynamic_filters(filters):
+    available_columns = _live_column_names()
+    virtual_fields = {"date_from", "accepted_date_from", "date_to", "accepted_date_to", "year"}
+    invalid_filters = []
+    for field, value in filters.items():
+        if value in (None, "", []):
+            continue
+        if field not in available_columns and field not in virtual_fields:
+            invalid_filters.append(
+                {
+                    "field": field,
+                    "value": value,
+                    "reason": "unknown_column",
+                }
+            )
+    if not invalid_filters:
+        return None
+    return {
+        "success": False,
+        "mode": "invalid_dynamic_filter",
+        "error_type": "invalid_dynamic_filter",
+        "error": "One or more filters do not match columns in the live PostgreSQL table.",
+        "invalid_filters": invalid_filters,
+        "allowed_filter_fields": sorted([*virtual_fields, *available_columns]),
+        "recommended_next_skill": "pg-table-profile",
+        "recommended_next_action": "Profile the table when the intended field or its valid values are unclear.",
+        "retry_guidance": "Replace or remove each invalid filter field. Valid field names come from the live table, not a static filter schema.",
+    }
+
+
 def _normalize_scope_filters(filters):
     assumptions = []
     explicit_region = str(filters.get("region") or "").strip()
@@ -335,6 +368,23 @@ def _dataset_status():
             cur.execute(f"SELECT COUNT(*) FROM {DEFAULT_TABLE}")
             row = cur.fetchone()
             return {"table_exists": True, "row_count": int(row[0] or 0), "table_name": DEFAULT_TABLE}
+
+
+def _live_column_names():
+    with _connect_postgres() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT attribute.attname
+                FROM pg_attribute AS attribute
+                WHERE attribute.attrelid = to_regclass(%s)
+                  AND attribute.attnum > 0
+                  AND NOT attribute.attisdropped
+                ORDER BY attribute.attnum
+                """,
+                (DEFAULT_TABLE,),
+            )
+            return {str(row[0]) for row in cur.fetchall()}
 
 
 def _execute_sql(sql):
