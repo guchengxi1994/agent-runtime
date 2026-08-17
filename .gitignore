@@ -372,3 +372,4 @@ vite.config.ts.timestamp-*
 artifacts/
 
 *.xlsx
+ticket.txt
