@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import importlib.util
 import json
 from dataclasses import replace
@@ -18,6 +19,9 @@ from agent_runtime.runner_client import build_skill_bundle, skill_uses_bundle
 from fastapi.testclient import TestClient
 from sandbox.runtime.models import ExecutionConfig
 from sandbox.runtime.process import cached_dependencies_match, write_dependency_marker
+
+
+app_module = importlib.import_module("agent_runtime.app")
 
 
 def write_skill(
@@ -1084,6 +1088,27 @@ def test_frontend_entrypoint_serves_static_page():
     assert response.status_code == 200
     assert "对话入口" in response.text
     assert "echarts.min.js" in response.text
+
+
+def test_workspace_document_upload_persists_raw_file_outside_chat_context(tmp_path, monkeypatch):
+    monkeypatch.setattr(app_module, "settings", replace(app_module.settings, artifacts_dir=tmp_path / "artifacts"))
+    client = TestClient(app)
+
+    response = client.post(
+        "/workspaces/ws_documents/documents/upload",
+        files={"file": ("Steel Handbook.pdf", b"%PDF-document", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["source_path"].startswith("document_knowledge/uploads_raw/")
+    stored = app_module.settings.artifacts_dir / "workspaces" / "ws_documents" / payload["source_path"]
+    assert stored.read_bytes() == b"%PDF-document"
+    invalid = client.post(
+        "/workspaces/../documents/documents/upload",
+        files={"file": ("report.pdf", b"payload", "application/pdf")},
+    )
+    assert invalid.status_code in {400, 404}
 
 
 def test_workspace_memory_api_returns_read_only_markdown(tmp_path, monkeypatch):

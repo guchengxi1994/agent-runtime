@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+import hashlib
 import json
+import re
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
@@ -38,6 +40,7 @@ NO_CACHE_HEADERS = {
     "Pragma": "no-cache",
     "Expires": "0",
 }
+MAX_DOCUMENT_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
 class NoCacheStaticFiles(StaticFiles):
@@ -203,6 +206,33 @@ async def retry_workspace_memory(workspace_id: str) -> dict[str, object]:
     return {"workspace_id": workspace_id, "retried": retried}
 
 
+@app.post("/workspaces/{workspace_id}/documents/upload")
+async def upload_workspace_document(workspace_id: str, file: UploadFile = File(...)) -> dict[str, object]:
+    normalized_workspace_id = _normalize_workspace_id(workspace_id)
+    filename = _safe_document_filename(file.filename)
+    payload = await file.read(MAX_DOCUMENT_UPLOAD_BYTES + 1)
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded document is empty.")
+    if len(payload) > MAX_DOCUMENT_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail=f"Document exceeds {MAX_DOCUMENT_UPLOAD_BYTES} bytes.")
+    digest = hashlib.sha256(payload).hexdigest()
+    stored_name = f"{digest[:12]}-{filename}"
+    root = settings.artifacts_dir / "workspaces" / normalized_workspace_id / "document_knowledge" / "uploads_raw"
+    root.mkdir(parents=True, exist_ok=True)
+    destination = root / stored_name
+    if not destination.exists():
+        destination.write_bytes(payload)
+    return {
+        "success": True,
+        "workspace_id": normalized_workspace_id,
+        "source_path": str(destination.relative_to(settings.artifacts_dir / "workspaces" / normalized_workspace_id)),
+        "filename": filename,
+        "size_bytes": len(payload),
+        "sha256": digest,
+        "next_action": "Ask the agent to call document-markdown-convert with source_path. The raw file remains outside chat context.",
+    }
+
+
 async def build_chat_request(http_request: Request) -> ChatRequest:
     content_type = (http_request.headers.get("content-type") or "").lower()
     try:
@@ -240,6 +270,21 @@ async def build_chat_request(http_request: Request) -> ChatRequest:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     raise HTTPException(status_code=415, detail="Unsupported content type. Use application/json or multipart/form-data.")
+
+
+def _normalize_workspace_id(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "-", value.strip()).strip("-_").lower()[:80]
+    if not normalized or normalized != value:
+        raise HTTPException(status_code=400, detail="workspace_id must contain only lowercase letters, digits, underscores, or hyphens.")
+    return normalized
+
+
+def _safe_document_filename(value: str | None) -> str:
+    name = Path(value or "document").name.strip()
+    cleaned = re.sub(r"[^\w.-]+", "-", name, flags=re.UNICODE).strip(".-")
+    if not cleaned:
+        raise HTTPException(status_code=400, detail="Uploaded document filename is invalid.")
+    return cleaned[:180]
 
 
 @app.post("/chat", response_model=ChatResponse)
